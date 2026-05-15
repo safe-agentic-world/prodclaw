@@ -29,6 +29,16 @@ go build ./cmd/prodclaw
 go test ./...
 ```
 
+## CI-First CLI
+
+ProdClaw commands are non-interactive by design. `job run` and `mcp` accept strict JSON config files, environment variables, and flags with precedence `file < environment < flags`, so CI jobs can define defaults once and override them explicitly when needed.
+
+```bash
+prodclaw job run --config ./prodclaw.json --dry-run
+```
+
+Structured operational logs are written to `stderr` as JSON and redact token-like fields before emission.
+
 ## Install
 
 For the MVP, install from source with Go:
@@ -57,10 +67,19 @@ go run ./cmd/prodclaw profiles show ci-standard
 
 Profile hashes are computed from the profile embedded in the running binary. ProdClaw does not require a checked-in hash pin file for policy edits.
 
+Use `ci-strict` by default or replace it with a customer-owned bundle once the job needs explicit organization policy:
+
+```bash
+prodclaw job run --agent codex --task task.md --dry-run
+prodclaw job run --agent codex --task task.md --policy-bundle ./policy/prodclaw.yaml --dry-run
+```
+
+See `docs/default-profiles.md` for the default-profile contract and the replacement path.
+
 ## Run As An MCP Boundary
 
 ```bash
 prodclaw mcp --profile ci-standard --workspace . --audit artifacts/prodclaw/audit.jsonl
 ```
 
-The MCP server exposes governed `read_file`, `write_file`, `apply_patch`, `run_command`, and `http_request` tools. Every tool call is converted into a ProdClaw action, evaluated against policy, and recorded in the audit log before execution.
+The MCP server exposes governed `read_file`, `write_file`, `apply_patch`, `run_command`, `http_request`, `call_tool`, and `write_artifact` tools. Every tool call is converted into a ProdClaw action, evaluated against policy, and recorded in the audit log with the final execution result.

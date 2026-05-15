@@ -130,6 +130,69 @@ func TestPolicyCheckRejectsBundleAndProfileTogether(t *testing.T) {
 	}
 }
 
+func TestJobRunDryRunDefaultsToCIStrictProfile(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task", taskPath, "--dry-run"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if got.Mode != "dry_run" || got.Agent != "codex" {
+		t.Fatalf("unexpected job metadata: %+v", got)
+	}
+	if got.Profile != "ci-strict" || got.PolicySource != "embedded_profile" || got.PolicyBundleHash == "" {
+		t.Fatalf("expected embedded ci-strict profile metadata, got %+v", got)
+	}
+}
+
+func TestJobRunRejectsBundleAndProfileTogether(t *testing.T) {
+	bundle, _ := writePolicyFixture(t, "ALLOW")
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task", taskPath, "--dry-run", "--bundle", bundle, "--profile", "ci-standard"}, &stdout, &stderr)
+	if code != 30 {
+		t.Fatalf("job run exit code = %d, want 30", code)
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("expected mutual exclusion error, got %q", stderr.String())
+	}
+}
+
+func TestJobRunLoadsConfigWithFlagPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	taskPath := filepath.Join(dir, "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	configPath := filepath.Join(dir, "prodclaw.json")
+	if err := os.WriteFile(configPath, []byte(`{"agent":"claude","task":"`+escapeJSONPath(taskPath)+`","profile":"ci-standard"}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PRODCLAW_PROFILE", "ci-strict")
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--config", configPath, "--agent", "codex", "--dry-run"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if got.Agent != "codex" || got.Profile != "ci-strict" {
+		t.Fatalf("expected flags over env over file, got %+v", got)
+	}
+}
+
 func writePolicyFixture(t *testing.T, decision string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -169,4 +232,9 @@ rules:
 		t.Fatalf("write action: %v", err)
 	}
 	return bundle, actionFile
+}
+
+func escapeJSONPath(path string) string {
+	data, _ := json.Marshal(path)
+	return strings.Trim(string(data), `"`)
 }

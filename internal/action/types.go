@@ -18,6 +18,8 @@ var builtInActionTypes = map[string]struct{}{
 	"repo.apply_patch": {},
 	"process.exec":     {},
 	"net.http_request": {},
+	"mcp.call":         {},
+	"artifact.write":   {},
 	"secrets.checkout": {},
 }
 

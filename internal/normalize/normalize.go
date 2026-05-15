@@ -1,6 +1,7 @@
 package normalize
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -27,6 +28,21 @@ type NormalizedAction struct {
 	Context          action.Context
 	TraceID          string
 	TraceActionCount int
+}
+
+const actionFingerprintVersion = "prodclaw.action_fingerprint.v1"
+
+type fingerprintPayload struct {
+	Version          string `json:"version"`
+	SchemaVersion    string `json:"schema_version"`
+	ActionType       string `json:"action_type"`
+	Resource         string `json:"resource"`
+	ParamsHash       string `json:"params_hash"`
+	Principal        string `json:"principal"`
+	Agent            string `json:"agent"`
+	Environment      string `json:"environment"`
+	TenantID         string `json:"tenant_id,omitempty"`
+	PolicyBundleHash string `json:"policy_bundle_hash"`
 }
 
 func Action(input action.Action) (NormalizedAction, error) {
@@ -64,6 +80,47 @@ func Action(input action.Action) (NormalizedAction, error) {
 		Context:       input.Context,
 		TraceID:       input.TraceID,
 	}, nil
+}
+
+func Fingerprint(input NormalizedAction, policyBundleHash string) (string, error) {
+	if strings.TrimSpace(input.SchemaVersion) == "" {
+		return "", errors.New("schema_version is required")
+	}
+	if strings.TrimSpace(input.ActionType) == "" {
+		return "", errors.New("action_type is required")
+	}
+	if strings.TrimSpace(input.Resource) == "" {
+		return "", errors.New("resource is required")
+	}
+	if strings.TrimSpace(input.ParamsHash) == "" {
+		return "", errors.New("params_hash is required")
+	}
+	if strings.TrimSpace(input.Principal) == "" || strings.TrimSpace(input.Agent) == "" || strings.TrimSpace(input.Environment) == "" {
+		return "", errors.New("verified identity is required")
+	}
+	if strings.TrimSpace(policyBundleHash) == "" {
+		return "", errors.New("policy_bundle_hash is required")
+	}
+	payload, err := json.Marshal(fingerprintPayload{
+		Version:          actionFingerprintVersion,
+		SchemaVersion:    input.SchemaVersion,
+		ActionType:       input.ActionType,
+		Resource:         input.Resource,
+		ParamsHash:       input.ParamsHash,
+		Principal:        input.Principal,
+		Agent:            input.Agent,
+		Environment:      input.Environment,
+		TenantID:         input.TenantID,
+		PolicyBundleHash: policyBundleHash,
+	})
+	if err != nil {
+		return "", err
+	}
+	canonical, err := canonicaljson.Canonicalize(payload)
+	if err != nil {
+		return "", err
+	}
+	return canonicaljson.HashSHA256(canonical), nil
 }
 
 func NormalizeResource(raw string) (string, error) {
@@ -113,6 +170,8 @@ func normalizeResource(raw string) (string, error) {
 		return normalizeSecretResource(parsed)
 	case "mcp":
 		return normalizeMCPResource(parsed)
+	case "artifact":
+		return normalizeArtifactResource(parsed)
 	default:
 		return "", fmt.Errorf("unsupported resource scheme %q", parsed.Scheme)
 	}
@@ -262,6 +321,33 @@ func normalizeMCPResource(parsed *url.URL) (string, error) {
 		}
 		return "mcp://" + host + "/" + name, nil
 	}
+}
+
+func normalizeArtifactResource(parsed *url.URL) (string, error) {
+	if parsed.User != nil {
+		return "", errors.New("artifact userinfo is not allowed")
+	}
+	if parsed.RawQuery != "" {
+		return "", errors.New("artifact query is not allowed")
+	}
+	if parsed.Fragment != "" {
+		return "", errors.New("artifact fragment is not allowed")
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Host))
+	if host == "" {
+		host = "job"
+	}
+	if host != "job" {
+		return "", fmt.Errorf("unsupported artifact host %q", parsed.Host)
+	}
+	cleaned, err := normalizeResourcePath(parsed.EscapedPath(), "artifact")
+	if err != nil {
+		return "", err
+	}
+	if cleaned == "/" {
+		return "", errors.New("artifact path is required")
+	}
+	return "artifact://" + host + cleaned, nil
 }
 
 func normalizeNetworkLocation(rawHost, rawPath string) (string, error) {

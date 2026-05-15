@@ -27,12 +27,24 @@ func TestDefaultPolicyProfileDecisions(t *testing.T) {
 		{name: "ci strict denies git push", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("git", "push", "origin", "main"), want: DecisionDeny},
 		{name: "ci strict denies terraform destroy", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("terraform", "destroy"), want: DecisionDeny},
 		{name: "ci strict allows go test", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("go", "test", "./..."), want: DecisionAllow},
+		{name: "ci strict denies go env", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("go", "env"), want: DecisionDeny},
+		{name: "ci strict allows terraform plan", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("terraform", "plan"), want: DecisionAllow},
+		{name: "ci strict allows kubectl get", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("kubectl", "get", "pods"), want: DecisionAllow},
+		{name: "ci strict denies kubectl delete", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("kubectl", "delete", "pod", "x"), want: DecisionDeny},
 		{name: "ci strict allows structured publish", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("prodclaw", "publish-artifact", "dist/app.tgz"), want: DecisionAllow},
+		{name: "ci strict allows artifact writes", profile: "ci-strict", actionType: "artifact.write", resource: "artifact://job/summary.txt", params: map[string]any{"path": "summary.txt"}, want: DecisionAllow},
 		{name: "ci strict denies unknown egress by default", profile: "ci-strict", actionType: "net.http_request", resource: "url://unknown.example.com/api", params: httpParamsForTest("GET", nil), want: DecisionDeny},
 		{name: "ci standard denies dotenv", profile: "ci-standard", actionType: "fs.read", resource: "file://workspace/.env", params: map[string]any{"resource": ".env"}, want: DecisionDeny},
 		{name: "ci standard allows git status", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("git", "status"), want: DecisionAllow},
 		{name: "ci standard denies main branch push", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("git", "push", "origin", "main"), want: DecisionDeny},
+		{name: "ci standard denies terraform destroy", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("terraform", "destroy"), want: DecisionDeny},
+		{name: "ci standard denies go env", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("go", "env"), want: DecisionDeny},
+		{name: "ci standard allows terraform plan", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("terraform", "plan"), want: DecisionAllow},
+		{name: "ci standard allows kubectl get", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("kubectl", "get", "pods"), want: DecisionAllow},
+		{name: "ci standard denies kubectl delete", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("kubectl", "delete", "pod", "x"), want: DecisionDeny},
+		{name: "ci standard denies unknown egress by default", profile: "ci-standard", actionType: "net.http_request", resource: "url://unknown.example.com/api", params: httpParamsForTest("GET", nil), want: DecisionDeny},
 		{name: "ci standard allows feature branch push", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("git", "push", "origin", "HEAD:refs/heads/ai-dev-agent/ACDK-1"), want: DecisionAllow},
+		{name: "ci standard allows artifact writes", profile: "ci-standard", actionType: "artifact.write", resource: "artifact://job/summary.txt", params: map[string]any{"path": "summary.txt"}, want: DecisionAllow},
 		{name: "ci standard allows merge request create", profile: "ci-standard", actionType: "net.http_request", resource: "url://gitlab.com/api/v4/projects/123/merge_requests", params: httpParamsForTest("POST", map[string]string{"PRIVATE-TOKEN": "redacted"}), want: DecisionAllow},
 	}
 	for _, tc := range tests {
@@ -41,6 +53,19 @@ func TestDefaultPolicyProfileDecisions(t *testing.T) {
 			decision := evaluateProfileDecision(t, bundle, tc.actionType, tc.resource, tc.params)
 			if decision.Decision != tc.want {
 				t.Fatalf("decision = %s (%s via %v), want %s", decision.Decision, decision.ReasonCode, decision.MatchedRuleIDs, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultProfilesContainOnlyAllowOrDenyDecisions(t *testing.T) {
+	for _, name := range defaultProfileNames {
+		t.Run(name, func(t *testing.T) {
+			bundle := loadDefaultProfileBundle(t, name)
+			for _, rule := range bundle.Rules {
+				if rule.Decision != DecisionAllow && rule.Decision != DecisionDeny {
+					t.Fatalf("profile %s rule %s uses unsupported decision %s", name, rule.ID, rule.Decision)
+				}
 			}
 		})
 	}
@@ -85,6 +110,10 @@ func execParamsForTest(argv ...string) map[string]any {
 		"argv":               argv,
 		"cwd":                "",
 		"env_allowlist_keys": []string{},
+		"stdin_mode":         "none",
+		"shell_mode":         false,
+		"output_max_bytes":   0,
+		"output_max_lines":   0,
 	}
 }
 

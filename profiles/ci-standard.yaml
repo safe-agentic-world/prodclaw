@@ -57,6 +57,15 @@ rules:
         - ["git", "rebase"]
         - ["git", "rebase", "**"]
 
+  - id: ci-standard-deny-go-env
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["go", "env"]
+        - ["go", "env", "**"]
+
   - id: ci-standard-deny-infra-mutations
     action_type: process.exec
     resource: file://workspace/
@@ -93,6 +102,11 @@ rules:
     decision: ALLOW
     obligations:
       sandbox_mode: ci
+
+  - id: ci-standard-allow-artifacts
+    action_type: artifact.write
+    resource: artifact://job/**
+    decision: ALLOW
 
   - id: ci-standard-allow-git-readonly
     action_type: process.exec
@@ -158,6 +172,19 @@ rules:
     obligations:
       sandbox_mode: ci
 
+  - id: ci-standard-allow-infra-inspection
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["terraform", "plan"]
+        - ["terraform", "plan", "**"]
+        - ["kubectl", "get"]
+        - ["kubectl", "get", "**"]
+    obligations:
+      sandbox_mode: ci
+
   # CI may create merge requests but must not pass Authorization headers through policy fixtures.
   - id: ci-standard-deny-authenticated-http
     action_type: net.http_request
@@ -167,9 +194,41 @@ rules:
       headers.Authorization:
         present: true
 
-  - id: ci-standard-allow-readonly-http
+  - id: ci-standard-allow-github-readonly-http
     action_type: net.http_request
-    resource: url://**/**
+    resource: url://github.com/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  - id: ci-standard-allow-gitlab-readonly-http
+    action_type: net.http_request
+    resource: url://gitlab.com/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  - id: ci-standard-allow-go-proxy-readonly-http
+    action_type: net.http_request
+    resource: url://proxy.golang.org/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  - id: ci-standard-allow-npm-registry-readonly-http
+    action_type: net.http_request
+    resource: url://registry.npmjs.org/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  - id: ci-standard-allow-python-package-readonly-http
+    action_type: net.http_request
+    resource: url://pypi.org/**
     decision: ALLOW
     params_match:
       method:

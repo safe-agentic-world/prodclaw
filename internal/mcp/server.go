@@ -14,30 +14,43 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/safe-agentic-world/prodclaw/internal/action"
+	"github.com/safe-agentic-world/prodclaw/internal/audit"
+	"github.com/safe-agentic-world/prodclaw/internal/canonicaljson"
+	"github.com/safe-agentic-world/prodclaw/internal/executor"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/normalize"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
+	"github.com/safe-agentic-world/prodclaw/internal/redact"
 )
 
 type Server struct {
 	bundle      policy.Bundle
 	workspace   string
+	artifactDir string
 	auditPath   string
 	id          identity.VerifiedIdentity
 	httpClient  *http.Client
-	commandExec func(context.Context, string, []string, string) commandResult
+	redactor    *redact.Redactor
+	forwardTool ToolForwarder
+	commandExec func(context.Context, string, commandRequest) commandResult
 }
 
 type Options struct {
-	Bundle    policy.Bundle
-	Workspace string
-	AuditPath string
-	Identity  identity.VerifiedIdentity
+	Bundle      policy.Bundle
+	Workspace   string
+	ArtifactDir string
+	AuditPath   string
+	Identity    identity.VerifiedIdentity
+	Redactor    *redact.Redactor
+	ForwardTool ToolForwarder
 }
+
+type ToolForwarder func(context.Context, string, string, json.RawMessage) (any, error)
 
 type rpcRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -70,15 +83,23 @@ type commandResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
-type auditEvent struct {
-	Timestamp        string   `json:"timestamp"`
-	Tool             string   `json:"tool"`
-	ActionType       string   `json:"action_type"`
-	Resource         string   `json:"resource"`
-	Decision         string   `json:"decision"`
-	ReasonCode       string   `json:"reason_code"`
-	MatchedRuleIDs   []string `json:"matched_rule_ids"`
-	PolicyBundleHash string   `json:"policy_bundle_hash"`
+type commandRequest struct {
+	Argv             []string `json:"argv"`
+	CWD              string   `json:"cwd"`
+	EnvAllowlistKeys []string `json:"env_allowlist_keys"`
+	StdinMode        string   `json:"stdin_mode"`
+	ShellMode        bool     `json:"shell_mode"`
+	OutputMaxBytes   int      `json:"output_max_bytes"`
+	OutputMaxLines   int      `json:"output_max_lines"`
+}
+
+type authorizedAction struct {
+	tool        string
+	actionType  string
+	normalized  normalize.NormalizedAction
+	decision    policy.Decision
+	explanation policy.ExplainDetails
+	fingerprint string
 }
 
 func NewServer(opts Options) (*Server, error) {
@@ -100,11 +121,26 @@ func NewServer(opts Options) (*Server, error) {
 	if id.Environment == "" {
 		id.Environment = "ci"
 	}
+	artifactDir := strings.TrimSpace(opts.ArtifactDir)
+	if artifactDir == "" {
+		artifactDir = filepath.Join(absWorkspace, ".prodclaw", "artifacts")
+	}
+	absArtifactDir, err := filepath.Abs(artifactDir)
+	if err != nil {
+		return nil, err
+	}
+	redactor := opts.Redactor
+	if redactor == nil {
+		redactor = redact.DefaultRedactor()
+	}
 	return &Server{
-		bundle:    opts.Bundle,
-		workspace: absWorkspace,
-		auditPath: opts.AuditPath,
-		id:        id,
+		bundle:      opts.Bundle,
+		workspace:   absWorkspace,
+		artifactDir: absArtifactDir,
+		auditPath:   opts.AuditPath,
+		id:          id,
+		redactor:    redactor,
+		forwardTool: opts.ForwardTool,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -204,8 +240,13 @@ func toolDefinitions() []map[string]any {
 			"patch": map[string]any{"type": "string"},
 		}, []string{"patch"}),
 		tool("run_command", "Run a command through ProdClaw process.exec policy.", map[string]any{
-			"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			"cwd":  map[string]any{"type": "string"},
+			"argv":               map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"cwd":                map[string]any{"type": "string"},
+			"env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"stdin_mode":         map[string]any{"type": "string"},
+			"shell_mode":         map[string]any{"type": "boolean"},
+			"output_max_bytes":   map[string]any{"type": "integer"},
+			"output_max_lines":   map[string]any{"type": "integer"},
 		}, []string{"argv"}),
 		tool("http_request", "Send an HTTP request through ProdClaw net.http_request policy.", map[string]any{
 			"url":     map[string]any{"type": "string"},
@@ -213,6 +254,15 @@ func toolDefinitions() []map[string]any {
 			"headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
 			"body":    map[string]any{"type": "string"},
 		}, []string{"url"}),
+		tool("call_tool", "Forward an upstream tool call through ProdClaw mcp.call policy.", map[string]any{
+			"server":    map[string]any{"type": "string"},
+			"tool":      map[string]any{"type": "string"},
+			"arguments": map[string]any{"type": "object"},
+		}, []string{"server", "tool"}),
+		tool("write_artifact", "Write a job artifact through ProdClaw artifact.write policy.", map[string]any{
+			"path":    map[string]any{"type": "string"},
+			"content": map[string]any{"type": "string"},
+		}, []string{"path", "content"}),
 	}
 }
 
@@ -232,21 +282,25 @@ func tool(name, description string, properties map[string]any, required []string
 func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage) (any, error) {
 	switch name {
 	case "read_file":
-		return s.readFile(args)
+		return s.readFile(ctx, args)
 	case "write_file":
-		return s.writeFile(args)
+		return s.writeFile(ctx, args)
 	case "apply_patch":
 		return s.applyPatch(ctx, args)
 	case "run_command":
 		return s.runCommand(ctx, args)
 	case "http_request":
 		return s.httpRequest(ctx, args)
+	case "call_tool":
+		return s.callToolForward(ctx, args)
+	case "write_artifact":
+		return s.writeArtifact(ctx, args)
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
 }
 
-func (s *Server) readFile(args json.RawMessage) (any, error) {
+func (s *Server) readFile(ctx context.Context, args json.RawMessage) (any, error) {
 	var input struct {
 		Path string `json:"path"`
 	}
@@ -257,21 +311,29 @@ func (s *Server) readFile(args json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	decision, err := s.authorize("read_file", "fs.read", fileResource(rel), map[string]any{"resource": rel})
+	auth, err := s.authorize("read_file", "fs.read", fileResource(rel), map[string]any{"resource": rel})
 	if err != nil {
 		return nil, err
 	}
-	if decision.Decision != policy.DecisionAllow {
-		return deniedResult(decision), nil
+	if auth.decision.Decision != policy.DecisionAllow {
+		return s.deniedResult(auth), nil
+	}
+	execCtx, cancel := executor.WithTimeout(ctx, auth.decision.Obligations)
+	defer cancel()
+	if err := execCtx.Err(); err != nil {
+		return s.failureResult(auth, err), nil
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
-		return nil, err
+		return s.failureResult(auth, err), nil
 	}
-	return textResult(string(data)), nil
+	if err := execCtx.Err(); err != nil {
+		return s.failureResult(auth, err), nil
+	}
+	return s.textResult(auth, string(data), executor.ResultSuccess, false, false, 0, 0), nil
 }
 
-func (s *Server) writeFile(args json.RawMessage) (any, error) {
+func (s *Server) writeFile(ctx context.Context, args json.RawMessage) (any, error) {
 	var input struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -283,20 +345,28 @@ func (s *Server) writeFile(args json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	decision, err := s.authorize("write_file", "fs.write", fileResource(rel), map[string]any{"resource": rel, "bytes": len(input.Content)})
+	auth, err := s.authorize("write_file", "fs.write", fileResource(rel), map[string]any{"resource": rel, "bytes": len(input.Content)})
 	if err != nil {
 		return nil, err
 	}
-	if decision.Decision != policy.DecisionAllow {
-		return deniedResult(decision), nil
+	if auth.decision.Decision != policy.DecisionAllow {
+		return s.deniedResult(auth), nil
+	}
+	execCtx, cancel := executor.WithTimeout(ctx, auth.decision.Obligations)
+	defer cancel()
+	if err := execCtx.Err(); err != nil {
+		return s.failureResult(auth, err), nil
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		return nil, err
+		return s.failureResult(auth, err), nil
 	}
 	if err := os.WriteFile(abs, []byte(input.Content), 0o644); err != nil {
-		return nil, err
+		return s.failureResult(auth, err), nil
 	}
-	return textResult("ALLOW fs.write wrote " + rel), nil
+	if err := execCtx.Err(); err != nil {
+		return s.failureResult(auth, err), nil
+	}
+	return s.textResult(auth, "ALLOW fs.write wrote "+rel, executor.ResultSuccess, false, false, 0, 0), nil
 }
 
 func (s *Server) applyPatch(ctx context.Context, args json.RawMessage) (any, error) {
@@ -307,28 +377,27 @@ func (s *Server) applyPatch(ctx context.Context, args json.RawMessage) (any, err
 		return nil, err
 	}
 	sum := sha256.Sum256([]byte(input.Patch))
-	decision, err := s.authorize("apply_patch", "repo.apply_patch", "repo://local/workspace", map[string]any{"patch_sha256": hex.EncodeToString(sum[:])})
+	auth, err := s.authorize("apply_patch", "repo.apply_patch", "repo://local/workspace", map[string]any{"patch_sha256": hex.EncodeToString(sum[:])})
 	if err != nil {
 		return nil, err
 	}
-	if decision.Decision != policy.DecisionAllow {
-		return deniedResult(decision), nil
+	if auth.decision.Decision != policy.DecisionAllow {
+		return s.deniedResult(auth), nil
 	}
-	cmd := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", "-")
+	execCtx, cancel := executor.WithTimeout(ctx, auth.decision.Obligations)
+	defer cancel()
+	cmd := exec.CommandContext(execCtx, "git", "apply", "--whitespace=nowarn", "-")
 	cmd.Dir = s.workspace
 	cmd.Stdin = strings.NewReader(input.Patch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("git apply failed: %w: %s", err, string(out))
+		return s.failureResult(auth, fmt.Errorf("git apply failed: %w: %s", err, string(out))), nil
 	}
-	return textResult("ALLOW repo.apply_patch applied patch"), nil
+	return s.textResult(auth, "ALLOW repo.apply_patch applied patch", executor.ResultSuccess, false, false, 0, 0), nil
 }
 
 func (s *Server) runCommand(ctx context.Context, args json.RawMessage) (any, error) {
-	var input struct {
-		Argv []string `json:"argv"`
-		CWD  string   `json:"cwd"`
-	}
+	var input commandRequest
 	if err := decodeArgs(args, &input); err != nil {
 		return nil, err
 	}
@@ -343,15 +412,41 @@ func (s *Server) runCommand(ctx context.Context, args json.RawMessage) (any, err
 		}
 		cwd = abs
 	}
-	decision, err := s.authorize("run_command", "process.exec", "file://workspace/", map[string]any{"argv": input.Argv, "cwd": input.CWD, "env_allowlist_keys": []string{}})
+	if input.StdinMode == "" {
+		input.StdinMode = "none"
+	}
+	if input.StdinMode != "none" && input.StdinMode != "empty" {
+		return nil, errors.New("stdin_mode must be none or empty")
+	}
+	if input.OutputMaxBytes < 0 || input.OutputMaxLines < 0 {
+		return nil, errors.New("output caps must be >= 0")
+	}
+	auth, err := s.authorize("run_command", "process.exec", "file://workspace/", map[string]any{
+		"argv":               input.Argv,
+		"cwd":                input.CWD,
+		"env_allowlist_keys": input.EnvAllowlistKeys,
+		"stdin_mode":         input.StdinMode,
+		"shell_mode":         input.ShellMode,
+		"output_max_bytes":   input.OutputMaxBytes,
+		"output_max_lines":   input.OutputMaxLines,
+	})
 	if err != nil {
 		return nil, err
 	}
-	if decision.Decision != policy.DecisionAllow {
-		return deniedResult(decision), nil
+	if auth.decision.Decision != policy.DecisionAllow {
+		return s.deniedResult(auth), nil
 	}
-	result := s.commandExec(ctx, s.workspace, input.Argv, cwd)
-	return jsonTextResult(result), nil
+	input.CWD = cwd
+	execCtx, cancel := executor.WithTimeout(ctx, auth.decision.Obligations)
+	defer cancel()
+	result := s.commandExec(execCtx, s.workspace, input)
+	if err := execCtx.Err(); err != nil {
+		return s.failureJSONResult(auth, result, err, input.OutputMaxBytes, input.OutputMaxLines), nil
+	}
+	if result.Error != "" {
+		return s.jsonResult(auth, result, executor.ResultExecutionFailed, false, true, input.OutputMaxBytes, input.OutputMaxLines), nil
+	}
+	return s.jsonResult(auth, result, executor.ResultSuccess, false, false, input.OutputMaxBytes, input.OutputMaxLines), nil
 }
 
 func (s *Server) httpRequest(ctx context.Context, args json.RawMessage) (any, error) {
@@ -369,34 +464,119 @@ func (s *Server) httpRequest(ctx context.Context, args json.RawMessage) (any, er
 		method = http.MethodGet
 	}
 	resource := httpResource(input.URL)
-	decision, err := s.authorize("http_request", "net.http_request", resource, map[string]any{"method": method, "headers": input.Headers})
+	auth, err := s.authorize("http_request", "net.http_request", resource, map[string]any{"method": method, "headers": input.Headers})
 	if err != nil {
 		return nil, err
 	}
-	if decision.Decision != policy.DecisionAllow {
-		return deniedResult(decision), nil
+	if auth.decision.Decision != policy.DecisionAllow {
+		return s.deniedResult(auth), nil
 	}
+	execCtx, cancel := executor.WithTimeout(ctx, auth.decision.Obligations)
+	defer cancel()
 	actualURL := input.URL
 	if strings.HasPrefix(actualURL, "url://") {
 		actualURL = "https://" + strings.TrimPrefix(actualURL, "url://")
 	}
-	req, err := http.NewRequestWithContext(ctx, method, actualURL, strings.NewReader(input.Body))
+	req, err := http.NewRequestWithContext(execCtx, method, actualURL, strings.NewReader(input.Body))
 	if err != nil {
-		return nil, err
+		return s.failureResult(auth, err), nil
 	}
 	for key, value := range input.Headers {
 		req.Header.Set(key, value)
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return s.failureResult(auth, err), nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, executor.DefaultOutputMaxBytes+1))
+	if err != nil {
+		return s.failureResult(auth, err), nil
+	}
+	return s.jsonResult(auth, map[string]any{"status": resp.StatusCode, "body": string(body)}, executor.ResultSuccess, false, false, 0, 0), nil
+}
+
+func (s *Server) callToolForward(ctx context.Context, args json.RawMessage) (any, error) {
+	var input struct {
+		Server    string          `json:"server"`
+		Tool      string          `json:"tool"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := decodeArgs(args, &input); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(input.Server) == "" || strings.TrimSpace(input.Tool) == "" {
+		return nil, errors.New("server and tool are required")
+	}
+	if len(bytes.TrimSpace(input.Arguments)) == 0 {
+		input.Arguments = json.RawMessage(`{}`)
+	}
+	canonicalArgs, err := canonicaljson.Canonicalize(input.Arguments)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize tool arguments: %w", err)
+	}
+	var argumentValue any
+	if err := json.Unmarshal(canonicalArgs, &argumentValue); err != nil {
+		return nil, fmt.Errorf("decode tool arguments: %w", err)
+	}
+	auth, err := s.authorize("call_tool", "mcp.call", "mcp://"+input.Server+"/"+input.Tool, map[string]any{
+		"upstream_server":     input.Server,
+		"upstream_tool":       input.Tool,
+		"tool_arguments":      argumentValue,
+		"tool_arguments_hash": canonicaljson.HashSHA256(canonicalArgs),
+	})
 	if err != nil {
 		return nil, err
 	}
-	return jsonTextResult(map[string]any{"status": resp.StatusCode, "body": string(body)}), nil
+	if auth.decision.Decision != policy.DecisionAllow {
+		return s.deniedResult(auth), nil
+	}
+	if s.forwardTool == nil {
+		return s.unsupportedResult(auth, "mcp forwarding is not configured"), nil
+	}
+	execCtx, cancel := executor.WithTimeout(ctx, auth.decision.Obligations)
+	defer cancel()
+	result, err := s.forwardTool(execCtx, input.Server, input.Tool, canonicalArgs)
+	if err != nil {
+		return s.failureResult(auth, err), nil
+	}
+	return s.jsonResult(auth, result, executor.ResultSuccess, false, false, 0, 0), nil
+}
+
+func (s *Server) writeArtifact(ctx context.Context, args json.RawMessage) (any, error) {
+	var input struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := decodeArgs(args, &input); err != nil {
+		return nil, err
+	}
+	abs, rel, err := s.artifactPath(input.Path)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := s.authorize("write_artifact", "artifact.write", artifactResource(rel), map[string]any{"path": rel, "bytes": len(input.Content)})
+	if err != nil {
+		return nil, err
+	}
+	if auth.decision.Decision != policy.DecisionAllow {
+		return s.deniedResult(auth), nil
+	}
+	execCtx, cancel := executor.WithTimeout(ctx, auth.decision.Obligations)
+	defer cancel()
+	if err := execCtx.Err(); err != nil {
+		return s.failureResult(auth, err), nil
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return s.failureResult(auth, err), nil
+	}
+	if err := os.WriteFile(abs, []byte(input.Content), 0o600); err != nil {
+		return s.failureResult(auth, err), nil
+	}
+	if err := execCtx.Err(); err != nil {
+		return s.failureResult(auth, err), nil
+	}
+	return s.textResult(auth, "ALLOW artifact.write wrote "+rel, executor.ResultSuccess, false, false, 0, 0), nil
 }
 
 func decodeArgs(args json.RawMessage, dst any) error {
@@ -411,10 +591,10 @@ func decodeArgs(args json.RawMessage, dst any) error {
 	return nil
 }
 
-func (s *Server) authorize(tool, actionType, resource string, params map[string]any) (policy.Decision, error) {
+func (s *Server) authorize(tool, actionType, resource string, params map[string]any) (authorizedAction, error) {
 	paramBytes, err := json.Marshal(params)
 	if err != nil {
-		return policy.Decision{}, err
+		return authorizedAction{}, err
 	}
 	act, err := action.ToAction(action.Request{
 		SchemaVersion: "v1",
@@ -426,29 +606,60 @@ func (s *Server) authorize(tool, actionType, resource string, params map[string]
 		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
 	}, s.id)
 	if err != nil {
-		return policy.Decision{}, err
+		return authorizedAction{}, err
 	}
 	normalized, err := normalize.Action(act)
 	if err != nil {
-		return policy.Decision{}, err
+		return authorizedAction{}, err
 	}
-	decision := policy.NewEngine(s.bundle).Evaluate(normalized)
-	_ = s.audit(auditEvent{
-		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
-		Tool:             tool,
-		ActionType:       actionType,
-		Resource:         normalized.Resource,
-		Decision:         decision.Decision,
-		ReasonCode:       decision.ReasonCode,
-		MatchedRuleIDs:   decision.MatchedRuleIDs,
-		PolicyBundleHash: decision.PolicyBundleHash,
-	})
-	return decision, nil
+	explanation := policy.NewEngine(s.bundle).Explain(normalized)
+	decision := explanation.Decision
+	fingerprint, err := normalize.Fingerprint(normalized, decision.PolicyBundleHash)
+	if err != nil {
+		return authorizedAction{}, err
+	}
+	return authorizedAction{
+		tool:        tool,
+		actionType:  actionType,
+		normalized:  normalized,
+		decision:    decision,
+		explanation: explanation,
+		fingerprint: fingerprint,
+	}, nil
 }
 
-func (s *Server) audit(event auditEvent) error {
+func (s *Server) recordAudit(auth authorizedAction, outcome executor.Outcome) {
+	_ = s.audit(audit.Event{
+		SchemaVersion:     audit.SchemaVersionV1,
+		Timestamp:         time.Now().UTC().Format(time.RFC3339Nano),
+		ActionID:          auth.normalized.ActionID,
+		TraceID:           auth.normalized.TraceID,
+		Tool:              auth.tool,
+		ActionType:        auth.actionType,
+		Resource:          auth.normalized.Resource,
+		ParamsHash:        auth.normalized.ParamsHash,
+		Principal:         auth.normalized.Principal,
+		Agent:             auth.normalized.Agent,
+		Environment:       auth.normalized.Environment,
+		ActionFingerprint: auth.fingerprint,
+		Decision:          auth.decision.Decision,
+		ReasonCode:        auth.decision.ReasonCode,
+		MatchedRuleIDs:    auth.decision.MatchedRuleIDs,
+		PolicyBundleHash:  auth.decision.PolicyBundleHash,
+		ResultCode:        outcome.ResultCode,
+		Retryable:         outcome.Retryable,
+		RedactionSummary:  outcome.RedactionSummary,
+		ExecCondition:     auth.explanation.ExecAuthorization.ConditionClass,
+	})
+}
+
+func (s *Server) audit(event audit.Event) error {
 	if strings.TrimSpace(s.auditPath) == "" {
 		return nil
+	}
+	event = audit.RedactEvent(event, s.redactor)
+	if err := audit.ValidateEventSchema(event); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(s.auditPath), 0o755); err != nil {
 		return err
@@ -481,6 +692,25 @@ func (s *Server) workspacePath(input string) (string, string, error) {
 	return abs, filepath.ToSlash(rel), nil
 }
 
+func (s *Server) artifactPath(input string) (string, string, error) {
+	cleanInput := filepath.Clean(strings.TrimSpace(input))
+	if cleanInput == "." || cleanInput == string(filepath.Separator) {
+		return "", "", errors.New("artifact path is required")
+	}
+	if filepath.IsAbs(cleanInput) {
+		return "", "", errors.New("absolute artifact paths are not allowed")
+	}
+	abs := filepath.Join(s.artifactDir, cleanInput)
+	rel, err := filepath.Rel(s.artifactDir, abs)
+	if err != nil {
+		return "", "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "", errors.New("artifact path escapes artifact dir")
+	}
+	return abs, filepath.ToSlash(rel), nil
+}
+
 func fileResource(rel string) string {
 	if rel == "" {
 		return "file://workspace/"
@@ -498,9 +728,14 @@ func httpResource(raw string) string {
 	return "url://" + raw
 }
 
-func runCommand(ctx context.Context, workspace string, argv []string, cwd string) commandResult {
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Dir = cwd
+func artifactResource(rel string) string {
+	return "artifact://job/" + rel
+}
+
+func runCommand(ctx context.Context, _ string, req commandRequest) commandResult {
+	cmd := exec.CommandContext(ctx, req.Argv[0], req.Argv[1:]...)
+	cmd.Dir = req.CWD
+	cmd.Env = commandEnvironment(req.EnvAllowlistKeys)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -519,26 +754,80 @@ func runCommand(ctx context.Context, workspace string, argv []string, cwd string
 	return result
 }
 
-func deniedResult(decision policy.Decision) map[string]any {
-	return map[string]any{
-		"isError": true,
-		"content": []map[string]any{{
-			"type": "text",
-			"text": fmt.Sprintf("DENY %s by %s matched=%v hash=%s", decision.ReasonCode, decision.Decision, decision.MatchedRuleIDs, decision.PolicyBundleHash),
-		}},
+func commandEnvironment(allowlist []string) []string {
+	keys := map[string]struct{}{}
+	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG"} {
+		keys[key] = struct{}{}
 	}
+	for _, key := range allowlist {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			keys[key] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(keys))
+	for key := range keys {
+		ordered = append(ordered, key)
+	}
+	sort.Strings(ordered)
+	env := make([]string, 0, len(ordered))
+	for _, key := range ordered {
+		if value, ok := os.LookupEnv(key); ok {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
 }
 
-func textResult(text string) map[string]any {
-	return map[string]any{
-		"content": []map[string]any{{"type": "text", "text": text}},
-	}
+func (s *Server) deniedResult(auth authorizedAction) map[string]any {
+	return s.textResult(
+		auth,
+		fmt.Sprintf("DENY %s by %s matched=%v hash=%s", auth.decision.ReasonCode, auth.decision.Decision, auth.decision.MatchedRuleIDs, auth.decision.PolicyBundleHash),
+		executor.ResultDeniedPolicy,
+		false,
+		true,
+		0,
+		0,
+	)
 }
 
-func jsonTextResult(value any) map[string]any {
+func (s *Server) unsupportedResult(auth authorizedAction, message string) map[string]any {
+	return s.textResult(auth, message, executor.ResultUnsupported, false, true, 0, 0)
+}
+
+func (s *Server) failureResult(auth authorizedAction, err error) map[string]any {
+	code, retryable := executor.ClassifyError(err)
+	return s.textResult(auth, err.Error(), code, retryable, true, 0, 0)
+}
+
+func (s *Server) failureJSONResult(auth authorizedAction, value any, err error, requestedMaxBytes, requestedMaxLines int) map[string]any {
+	code, retryable := executor.ClassifyError(err)
+	return s.jsonResult(auth, value, code, retryable, true, requestedMaxBytes, requestedMaxLines)
+}
+
+func (s *Server) textResult(auth authorizedAction, text, resultCode string, retryable, isError bool, requestedMaxBytes, requestedMaxLines int) map[string]any {
+	sanitized, summary := executor.SanitizeOutput(s.redactor, text, auth.decision.Obligations, requestedMaxBytes, requestedMaxLines)
+	s.recordAudit(auth, executor.Outcome{
+		ResultCode:       resultCode,
+		Retryable:        retryable,
+		RedactionSummary: summary,
+	})
+	result := map[string]any{
+		"result_code": resultCode,
+		"retryable":   retryable,
+		"redaction":   summary,
+		"content":     []map[string]any{{"type": "text", "text": sanitized}},
+	}
+	if isError {
+		result["isError"] = true
+	}
+	return result
+}
+
+func (s *Server) jsonResult(auth authorizedAction, value any, resultCode string, retryable, isError bool, requestedMaxBytes, requestedMaxLines int) map[string]any {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		return textResult(fmt.Sprintf("%+v", value))
+		return s.textResult(auth, fmt.Sprintf("%+v", value), resultCode, retryable, isError, requestedMaxBytes, requestedMaxLines)
 	}
-	return textResult(string(data))
+	return s.textResult(auth, string(data), resultCode, retryable, isError, requestedMaxBytes, requestedMaxLines)
 }

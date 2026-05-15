@@ -8,9 +8,8 @@ import (
 )
 
 const (
-	DecisionAllow           = "ALLOW"
-	DecisionDeny            = "DENY"
-	DecisionRequireApproval = "REQUIRE_APPROVAL"
+	DecisionAllow = "ALLOW"
+	DecisionDeny  = "DENY"
 )
 
 type Decision struct {
@@ -25,13 +24,12 @@ type Decision struct {
 }
 
 type ExplainDetails struct {
-	Decision               Decision
-	DenyRules              []DeniedRuleExplanation
-	AllowRuleIDs           []string
-	RequireApprovalRuleIDs []string
-	ObligationsPreview     map[string]any
-	ExecAuthorization      ExecAuthorizationSummary
-	MatchedRuleProvenance  []MatchedRuleProvenance
+	Decision              Decision
+	DenyRules             []DeniedRuleExplanation
+	AllowRuleIDs          []string
+	ObligationsPreview    map[string]any
+	ExecAuthorization     ExecAuthorizationSummary
+	MatchedRuleProvenance []MatchedRuleProvenance
 }
 
 type DeniedRuleExplanation struct {
@@ -49,11 +47,9 @@ type MatchedRuleProvenance struct {
 
 type ActionCapability struct {
 	Allow           bool
-	RequireApproval bool
 	ResourceClasses []string
 	HostClasses     []string
 	ExecClasses     []string
-	ApprovalScopes  []string
 }
 
 type Engine struct {
@@ -86,17 +82,13 @@ func (e *Engine) BundleInputs() []BundleSource {
 }
 
 func (c ActionCapability) Available() bool {
-	return c.Allow || c.RequireApproval
+	return c.Allow
 }
 
 func (c ActionCapability) State() string {
 	switch {
-	case c.Allow && c.RequireApproval:
-		return "mixed"
 	case c.Allow:
 		return "allow"
-	case c.RequireApproval:
-		return "require_approval"
 	default:
 		return "unavailable"
 	}
@@ -105,7 +97,7 @@ func (c ActionCapability) State() string {
 func (e *Engine) CapabilityForActionType(actionType, principal, agent, environment string) ActionCapability {
 	capability := ActionCapability{}
 	for _, rule := range e.bundle.Rules {
-		if rule.Decision != DecisionAllow && rule.Decision != DecisionRequireApproval {
+		if rule.Decision != DecisionAllow {
 			continue
 		}
 		if !matchField(rule.ActionType, actionType) {
@@ -120,21 +112,14 @@ func (e *Engine) CapabilityForActionType(actionType, principal, agent, environme
 		if !matchList(rule.Environments, environment) {
 			continue
 		}
-		if rule.Decision == DecisionAllow {
-			capability.Allow = true
-		}
-		if rule.Decision == DecisionRequireApproval {
-			capability.RequireApproval = true
-		}
+		capability.Allow = true
 		capability.ResourceClasses = appendUniqueString(capability.ResourceClasses, summarizeCapabilityResourceClass(actionType, rule.Resource))
 		capability.HostClasses = appendUniqueString(capability.HostClasses, summarizeCapabilityHostClass(actionType, rule.Resource))
 		capability.ExecClasses = appendUniqueString(capability.ExecClasses, summarizeCapabilityExecClass(actionType, rule))
-		capability.ApprovalScopes = appendUniqueString(capability.ApprovalScopes, summarizeCapabilityApprovalScope(rule))
 	}
 	sort.Strings(capability.ResourceClasses)
 	sort.Strings(capability.HostClasses)
 	sort.Strings(capability.ExecClasses)
-	sort.Strings(capability.ApprovalScopes)
 	return capability
 }
 
@@ -147,6 +132,28 @@ func (e *Engine) Evaluate(action normalize.NormalizedAction) Decision {
 }
 
 func (e *Engine) Explain(action normalize.NormalizedAction) ExplainDetails {
+	if action.ActionType == "process.exec" {
+		if params, ok := decodeExecParams(action.Params); ok {
+			if reasonCode, conditionClass := classifyExecPreflight(params); reasonCode != "" {
+				return ExplainDetails{
+					Decision: Decision{
+						Decision:            DecisionDeny,
+						ReasonCode:          reasonCode,
+						MatchedRuleIDs:      []string{},
+						Obligations:         map[string]any{},
+						PolicyBundleHash:    e.bundle.Hash,
+						PolicyBundleSources: policyBundleSources(e.bundle),
+						PolicyBundleInputs:  copyBundleSources(e.bundle.SourceBundles),
+					},
+					DenyRules:             []DeniedRuleExplanation{},
+					AllowRuleIDs:          []string{},
+					ObligationsPreview:    map[string]any{},
+					ExecAuthorization:     execPreflightSummary(conditionClass),
+					MatchedRuleProvenance: []MatchedRuleProvenance{},
+				}
+			}
+		}
+	}
 	risk := ComputeRiskFlags(action)
 	matched := make([]Rule, 0)
 	for _, rule := range e.bundle.Rules {
@@ -178,11 +185,9 @@ func (e *Engine) Explain(action normalize.NormalizedAction) ExplainDetails {
 		matched = append(matched, rule)
 	}
 	denyIDs := make([]string, 0)
-	requireIDs := make([]string, 0)
 	allowIDs := make([]string, 0)
 	denyExplanations := make([]DeniedRuleExplanation, 0)
 	denyObligations := mergeObligations(matched, DecisionDeny)
-	requireObligations := withDerivedExecConstraints(mergeObligations(matched, DecisionRequireApproval), matched, DecisionRequireApproval)
 	allowObligations := withDerivedExecConstraints(mergeObligations(matched, DecisionAllow), matched, DecisionAllow)
 	execAuthorization := summarizeExecAuthorization(matched, allowObligations)
 	matchedRuleProvenance := buildMatchedRuleProvenance(matched)
@@ -197,12 +202,11 @@ func (e *Engine) Explain(action normalize.NormalizedAction) ExplainDetails {
 				PolicyBundleSources: policyBundleSources(e.bundle),
 				PolicyBundleInputs:  copyBundleSources(e.bundle.SourceBundles),
 			},
-			DenyRules:              []DeniedRuleExplanation{},
-			AllowRuleIDs:           []string{},
-			RequireApprovalRuleIDs: []string{},
-			ObligationsPreview:     map[string]any{},
-			ExecAuthorization:      ExecAuthorizationSummary{ConditionClass: "none", RuntimeEnforcementHint: "policy_only"},
-			MatchedRuleProvenance:  []MatchedRuleProvenance{},
+			DenyRules:             []DeniedRuleExplanation{},
+			AllowRuleIDs:          []string{},
+			ObligationsPreview:    map[string]any{},
+			ExecAuthorization:     ExecAuthorizationSummary{ConditionClass: "none", RuntimeEnforcementHint: "policy_only"},
+			MatchedRuleProvenance: []MatchedRuleProvenance{},
 		}
 	}
 	for _, rule := range matched {
@@ -224,15 +228,11 @@ func (e *Engine) Explain(action normalize.NormalizedAction) ExplainDetails {
 				},
 			})
 		}
-		if rule.Decision == DecisionRequireApproval {
-			requireIDs = append(requireIDs, rule.ID)
-		}
 		if rule.Decision == DecisionAllow {
 			allowIDs = append(allowIDs, rule.ID)
 		}
 	}
 	sort.Strings(denyIDs)
-	sort.Strings(requireIDs)
 	sort.Strings(allowIDs)
 	sort.Slice(denyExplanations, func(i, j int) bool {
 		return denyExplanations[i].RuleID < denyExplanations[j].RuleID
@@ -248,17 +248,15 @@ func (e *Engine) Explain(action normalize.NormalizedAction) ExplainDetails {
 				PolicyBundleSources: policyBundleSources(e.bundle),
 				PolicyBundleInputs:  copyBundleSources(e.bundle.SourceBundles),
 			},
-			DenyRules:              denyExplanations,
-			AllowRuleIDs:           append([]string{}, allowIDs...),
-			RequireApprovalRuleIDs: append([]string{}, requireIDs...),
-			ObligationsPreview:     copyObligations(allowObligations),
-			ExecAuthorization:      execAuthorization,
-			MatchedRuleProvenance:  matchedRuleProvenance,
+			DenyRules:             denyExplanations,
+			AllowRuleIDs:          append([]string{}, allowIDs...),
+			ObligationsPreview:    copyObligations(allowObligations),
+			ExecAuthorization:     execAuthorization,
+			MatchedRuleProvenance: matchedRuleProvenance,
 		}
 	}
 	if action.ActionType == "process.exec" && execAuthorization.Conflict {
 		conflictingRuleIDs := append([]string{}, allowIDs...)
-		conflictingRuleIDs = append(conflictingRuleIDs, requireIDs...)
 		sort.Strings(conflictingRuleIDs)
 		return ExplainDetails{
 			Decision: Decision{
@@ -270,31 +268,11 @@ func (e *Engine) Explain(action normalize.NormalizedAction) ExplainDetails {
 				PolicyBundleSources: policyBundleSources(e.bundle),
 				PolicyBundleInputs:  copyBundleSources(e.bundle.SourceBundles),
 			},
-			DenyRules:              []DeniedRuleExplanation{},
-			AllowRuleIDs:           append([]string{}, allowIDs...),
-			RequireApprovalRuleIDs: append([]string{}, requireIDs...),
-			ObligationsPreview:     copyObligations(allowObligations),
-			ExecAuthorization:      execAuthorization,
-			MatchedRuleProvenance:  matchedRuleProvenance,
-		}
-	}
-	if len(requireIDs) > 0 {
-		return ExplainDetails{
-			Decision: Decision{
-				Decision:            DecisionRequireApproval,
-				ReasonCode:          "require_approval_by_rule",
-				MatchedRuleIDs:      requireIDs,
-				Obligations:         requireObligations,
-				PolicyBundleHash:    e.bundle.Hash,
-				PolicyBundleSources: policyBundleSources(e.bundle),
-				PolicyBundleInputs:  copyBundleSources(e.bundle.SourceBundles),
-			},
-			DenyRules:              []DeniedRuleExplanation{},
-			AllowRuleIDs:           append([]string{}, allowIDs...),
-			RequireApprovalRuleIDs: append([]string{}, requireIDs...),
-			ObligationsPreview:     copyObligations(requireObligations),
-			ExecAuthorization:      summarizeExecAuthorization(matched, requireObligations),
-			MatchedRuleProvenance:  matchedRuleProvenance,
+			DenyRules:             []DeniedRuleExplanation{},
+			AllowRuleIDs:          append([]string{}, allowIDs...),
+			ObligationsPreview:    copyObligations(allowObligations),
+			ExecAuthorization:     execAuthorization,
+			MatchedRuleProvenance: matchedRuleProvenance,
 		}
 	}
 	return ExplainDetails{
@@ -307,12 +285,11 @@ func (e *Engine) Explain(action normalize.NormalizedAction) ExplainDetails {
 			PolicyBundleSources: policyBundleSources(e.bundle),
 			PolicyBundleInputs:  copyBundleSources(e.bundle.SourceBundles),
 		},
-		DenyRules:              []DeniedRuleExplanation{},
-		AllowRuleIDs:           append([]string{}, allowIDs...),
-		RequireApprovalRuleIDs: []string{},
-		ObligationsPreview:     copyObligations(allowObligations),
-		ExecAuthorization:      summarizeExecAuthorization(matched, allowObligations),
-		MatchedRuleProvenance:  matchedRuleProvenance,
+		DenyRules:             []DeniedRuleExplanation{},
+		AllowRuleIDs:          append([]string{}, allowIDs...),
+		ObligationsPreview:    copyObligations(allowObligations),
+		ExecAuthorization:     summarizeExecAuthorization(matched, allowObligations),
+		MatchedRuleProvenance: matchedRuleProvenance,
 	}
 }
 
@@ -431,19 +408,6 @@ func summarizeCapabilityExecClass(actionType string, rule Rule) string {
 		return "legacy_exec_allowlist"
 	default:
 		return "generic_exec"
-	}
-}
-
-func summarizeCapabilityApprovalScope(rule Rule) string {
-	if rule.Decision != DecisionRequireApproval {
-		return ""
-	}
-	value, _ := rule.Obligations["approval_scope_class"].(string)
-	switch strings.TrimSpace(value) {
-	case "":
-		return ""
-	default:
-		return value
 	}
 }
 

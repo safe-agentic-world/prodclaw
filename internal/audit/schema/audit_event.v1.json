@@ -1,0 +1,115 @@
+{
+  "type": "object",
+  "required": [
+    "schema_version",
+    "timestamp",
+    "action_id",
+    "trace_id",
+    "action_type",
+    "resource",
+    "params_hash",
+    "principal",
+    "agent",
+    "environment",
+    "action_fingerprint",
+    "decision",
+    "reason_code",
+    "matched_rule_ids",
+    "policy_bundle_hash",
+    "result_code",
+    "retryable",
+    "redaction_summary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["v1"]
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tool": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resource": {
+      "type": "string",
+      "minLength": 1
+    },
+    "params_hash": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "principal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "environment": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action_fingerprint": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["ALLOW", "DENY"]
+    },
+    "reason_code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "matched_rule_ids": {
+      "type": "array"
+    },
+    "policy_bundle_hash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "result_code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "redaction_summary": {
+      "type": "object",
+      "required": ["applied", "truncated"],
+      "additionalProperties": false,
+      "properties": {
+        "applied": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "exec_condition": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

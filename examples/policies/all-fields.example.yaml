@@ -26,14 +26,13 @@ rules:
       http_redirect_hop_limit: 2
       output_max_bytes: 65536
       output_max_lines: 200
-      approval_scope_class: action_type_resource
       credential_lease_ids:
         - github_token
         - docker_registry_token
-  - id: require-approval-http-request
+  - id: deny-sensitive-http-request
     action_type: net.http_request
     resource: url://api.example.com/**
-    decision: REQUIRE_APPROVAL
+    decision: DENY
     principals:
       - system
     agents:
@@ -47,7 +46,6 @@ rules:
         - api.example.com
       http_redirects: true
       http_redirect_hop_limit: 1
-      approval_scope_class: action_type_resource
   - id: deny-secret-read
     action_type: fs.read
     resource: secret://prod/**

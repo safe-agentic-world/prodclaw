@@ -1,13 +1,22 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"strings"
 
 	"github.com/safe-agentic-world/prodclaw/internal/normalize"
 )
 
 type execParams struct {
-	Argv []string `json:"argv"`
+	Argv             []string `json:"argv"`
+	CWD              string   `json:"cwd"`
+	EnvAllowlistKeys []string `json:"env_allowlist_keys"`
+	StdinMode        string   `json:"stdin_mode"`
+	ShellMode        bool     `json:"shell_mode"`
+	OutputMaxBytes   int      `json:"output_max_bytes"`
+	OutputMaxLines   int      `json:"output_max_lines"`
 }
 
 func matchExec(rule Rule, action normalize.NormalizedAction) bool {
@@ -31,11 +40,19 @@ func matchExec(rule Rule, action normalize.NormalizedAction) bool {
 
 func decodeExecParams(raw []byte) (execParams, bool) {
 	var params execParams
-	if err := json.Unmarshal(raw, &params); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&params); err != nil {
+		return execParams{}, false
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return execParams{}, false
 	}
 	if len(params.Argv) == 0 {
 		return execParams{}, false
+	}
+	if params.StdinMode == "" {
+		params.StdinMode = "none"
 	}
 	return params, true
 }
@@ -66,5 +83,76 @@ func matchArgvSegments(pattern, argv []string) bool {
 }
 
 func matchArgvToken(pattern, token string) bool {
-	return pattern == "*" || pattern == token
+	if pattern == "*" {
+		return true
+	}
+	if !strings.ContainsAny(pattern, "*?") {
+		return pattern == token
+	}
+	return matchArgvWildcard(pattern, token)
+}
+
+func matchArgvWildcard(pattern, value string) bool {
+	pIdx := 0
+	vIdx := 0
+	starIdx := -1
+	matchIdx := 0
+	for vIdx < len(value) {
+		if pIdx < len(pattern) && (pattern[pIdx] == value[vIdx] || pattern[pIdx] == '?') {
+			pIdx++
+			vIdx++
+			continue
+		}
+		if pIdx < len(pattern) && pattern[pIdx] == '*' {
+			starIdx = pIdx
+			matchIdx = vIdx
+			pIdx++
+			continue
+		}
+		if starIdx != -1 {
+			pIdx = starIdx + 1
+			matchIdx++
+			vIdx = matchIdx
+			continue
+		}
+		return false
+	}
+	for pIdx < len(pattern) && pattern[pIdx] == '*' {
+		pIdx++
+	}
+	return pIdx == len(pattern)
+}
+
+func classifyExecPreflight(params execParams) (string, string) {
+	if !params.ShellMode && hasShellMetacharacters(params.Argv) {
+		return "deny_by_exec_shell_metacharacters", "shell_metacharacter_risk"
+	}
+	if hasSensitiveEnvKey(params.EnvAllowlistKeys) {
+		return "deny_by_exec_env_secret", "env_secret_injection"
+	}
+	return "", ""
+}
+
+func hasShellMetacharacters(argv []string) bool {
+	for _, token := range argv {
+		if strings.ContainsAny(token, ";|&<>`") || strings.Contains(token, "$(") || strings.ContainsAny(token, "\r\n") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSensitiveEnvKey(keys []string) bool {
+	for _, key := range keys {
+		lower := strings.ToLower(strings.TrimSpace(key))
+		if strings.Contains(lower, "token") ||
+			strings.Contains(lower, "secret") ||
+			strings.Contains(lower, "password") ||
+			strings.Contains(lower, "credential") ||
+			strings.Contains(lower, "auth") ||
+			strings.HasSuffix(lower, "_key") {
+			return true
+		}
+	}
+	return false
 }

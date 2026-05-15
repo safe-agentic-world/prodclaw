@@ -260,7 +260,7 @@ func (b Bundle) Validate() error {
 		if rule.Resource == "" {
 			return fmt.Errorf("rule %s missing resource", rule.ID)
 		}
-		if rule.Decision != DecisionAllow && rule.Decision != DecisionDeny && rule.Decision != DecisionRequireApproval {
+		if rule.Decision != DecisionAllow && rule.Decision != DecisionDeny {
 			return fmt.Errorf("rule %s has invalid decision", rule.ID)
 		}
 		if err := validateParamsMatch(rule); err != nil {
@@ -314,7 +314,7 @@ func ValidateExecCompatibility(bundle Bundle, mode string) error {
 		if rule.ActionType != "process.exec" && rule.ActionType != "*" {
 			continue
 		}
-		if rule.Decision != DecisionAllow && rule.Decision != DecisionRequireApproval {
+		if rule.Decision != DecisionAllow {
 			continue
 		}
 		if _, ok := rule.Obligations[obligationExecAllowlist]; ok {

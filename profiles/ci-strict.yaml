@@ -88,6 +88,12 @@ rules:
     obligations:
       sandbox_mode: ci
 
+  # CI may write structured job artifacts through ProdClaw only.
+  - id: ci-strict-allow-artifact-write
+    action_type: artifact.write
+    resource: artifact://job/**
+    decision: ALLOW
+
   # CI must not publish repository state through ad hoc git push commands.
   - id: ci-strict-deny-git-push
     action_type: process.exec
@@ -110,6 +116,16 @@ rules:
         - ["git", "rebase", "**"]
         - ["git", "checkout", "--"]
         - ["git", "checkout", "--", "**"]
+
+  # CI must not expose the full Go environment through ad hoc inspection.
+  - id: ci-strict-deny-go-env
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["go", "env"]
+        - ["go", "env", "**"]
 
   # CI must not perform infrastructure mutations.
   - id: ci-strict-deny-infra-mutations
@@ -178,6 +194,20 @@ rules:
         - ["go", "build", "**"]
         - ["go", "vet"]
         - ["go", "vet", "**"]
+    obligations:
+      sandbox_mode: ci
+
+  # CI may inspect infrastructure state without mutating it.
+  - id: ci-strict-allow-infra-inspection
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["terraform", "plan"]
+        - ["terraform", "plan", "**"]
+        - ["kubectl", "get"]
+        - ["kubectl", "get", "**"]
     obligations:
       sandbox_mode: ci
 

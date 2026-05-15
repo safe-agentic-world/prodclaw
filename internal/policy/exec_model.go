@@ -6,6 +6,13 @@ type ExecAuthorizationSummary struct {
 	Conflict               bool   `json:"conflict"`
 }
 
+func execPreflightSummary(conditionClass string) ExecAuthorizationSummary {
+	return ExecAuthorizationSummary{
+		ConditionClass:         conditionClass,
+		RuntimeEnforcementHint: "policy_preflight",
+	}
+}
+
 func summarizeExecAuthorization(matched []Rule, decisionObligations map[string]any) ExecAuthorizationSummary {
 	summary := ExecAuthorizationSummary{
 		ConditionClass:         "none",
@@ -14,7 +21,7 @@ func summarizeExecAuthorization(matched []Rule, decisionObligations map[string]a
 	hasExecMatch := false
 	hasLegacyAllowlist := false
 	for _, rule := range matched {
-		if rule.Decision != DecisionAllow && rule.Decision != DecisionRequireApproval {
+		if rule.Decision != DecisionAllow {
 			continue
 		}
 		if rule.ExecMatch != nil {

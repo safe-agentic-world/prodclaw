@@ -5,7 +5,7 @@
   "properties": {
     "decision": {
       "type": "string",
-      "enum": ["ALLOW", "DENY", "REQUIRE_APPROVAL"]
+      "enum": ["ALLOW", "DENY"]
     },
     "reason_code": {
       "type": "string",

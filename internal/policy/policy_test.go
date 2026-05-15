@@ -51,27 +51,15 @@ func TestPolicyAllowAndDeny(t *testing.T) {
 	}
 }
 
-func TestPolicyRequireApproval(t *testing.T) {
+func TestLoadBundleRejectsRequireApproval(t *testing.T) {
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "bundle.json")
 	data := `{"version":"v1","rules":[{"id":"approve-net","action_type":"net.http_request","resource":"url://example.com/**","decision":"REQUIRE_APPROVAL","principals":["system"],"agents":["prodclaw"],"environments":["dev"]}]}`
 	if err := os.WriteFile(bundlePath, []byte(data), 0o600); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
-	bundle, err := LoadBundle(bundlePath)
-	if err != nil {
-		t.Fatalf("load bundle: %v", err)
-	}
-	engine := NewEngine(bundle)
-	decision := engine.Evaluate(normalize.NormalizedAction{
-		ActionType:  "net.http_request",
-		Resource:    "url://example.com/path",
-		Principal:   "system",
-		Agent:       "prodclaw",
-		Environment: "dev",
-	})
-	if decision.Decision != DecisionRequireApproval {
-		t.Fatalf("expected require_approval, got %s", decision.Decision)
+	if _, err := LoadBundle(bundlePath); err == nil || !strings.Contains(err.Error(), "invalid decision") {
+		t.Fatalf("expected invalid decision rejection, got %v", err)
 	}
 }
 
@@ -227,6 +215,70 @@ func TestPolicyExecMatchAllowsBroadCommandFamilyAndDeniesNarrowerPattern(t *test
 	}
 	if len(denied.AllowRuleIDs) != 1 || denied.AllowRuleIDs[0] != "allow-git" {
 		t.Fatalf("expected broad allow retained in preview, got %+v", denied.AllowRuleIDs)
+	}
+}
+
+func TestPolicyExecMatchSupportsPrefixesSubcommandsAndFlags(t *testing.T) {
+	bundle := Bundle{
+		Version: "v1",
+		Hash:    "bundle-hash",
+		Rules: []Rule{
+			{
+				ID:         "allow-go-test",
+				ActionType: "process.exec",
+				Resource:   "file://workspace/",
+				Decision:   DecisionAllow,
+				ExecMatch:  &ExecMatch{ArgvPatterns: [][]string{{"go", "test", "**"}}},
+			},
+			{
+				ID:         "deny-commit-amend",
+				ActionType: "process.exec",
+				Resource:   "file://workspace/",
+				Decision:   DecisionDeny,
+				ExecMatch:  &ExecMatch{ArgvPatterns: [][]string{{"git", "commit", "**", "--amend"}}},
+			},
+		},
+	}
+	engine := NewEngine(bundle)
+	if got := engine.Evaluate(execActionForTest(`{"argv":["go","test","./..."],"cwd":"","env_allowlist_keys":[],"stdin_mode":"none","shell_mode":false,"output_max_bytes":0,"output_max_lines":0}`)); got.Decision != DecisionAllow {
+		t.Fatalf("expected prefix/subcommand allow, got %+v", got)
+	}
+	if got := engine.Evaluate(execActionForTest(`{"argv":["git","commit","-m","x","--amend"],"cwd":"","env_allowlist_keys":[],"stdin_mode":"none","shell_mode":false,"output_max_bytes":0,"output_max_lines":0}`)); got.Decision != DecisionDeny {
+		t.Fatalf("expected flag-position deny, got %+v", got)
+	}
+}
+
+func TestPolicyExecPreflightDeniesShellMetacharactersAndSecretEnvKeys(t *testing.T) {
+	engine := NewEngine(Bundle{Version: "v1", Hash: "bundle-hash", Rules: []Rule{{
+		ID:         "allow-any-exec",
+		ActionType: "process.exec",
+		Resource:   "file://workspace/",
+		Decision:   DecisionAllow,
+		ExecMatch:  &ExecMatch{ArgvPatterns: [][]string{{"**"}}},
+	}}})
+	shellDenied := engine.Explain(execActionForTest(`{"argv":["git","status;whoami"],"cwd":"","env_allowlist_keys":[],"stdin_mode":"none","shell_mode":false,"output_max_bytes":0,"output_max_lines":0}`))
+	if shellDenied.Decision.ReasonCode != "deny_by_exec_shell_metacharacters" || shellDenied.ExecAuthorization.ConditionClass != "shell_metacharacter_risk" {
+		t.Fatalf("unexpected shell preflight result: %+v", shellDenied)
+	}
+	envDenied := engine.Explain(execActionForTest(`{"argv":["git","status"],"cwd":"","env_allowlist_keys":["GITLAB_TOKEN"],"stdin_mode":"none","shell_mode":false,"output_max_bytes":0,"output_max_lines":0}`))
+	if envDenied.Decision.ReasonCode != "deny_by_exec_env_secret" || envDenied.ExecAuthorization.ConditionClass != "env_secret_injection" {
+		t.Fatalf("unexpected env preflight result: %+v", envDenied)
+	}
+}
+
+func TestComputeRiskFlagsClassifiesExecOperations(t *testing.T) {
+	tests := map[string]string{
+		`{"argv":["git","push"],"cwd":"","env_allowlist_keys":[],"stdin_mode":"none","shell_mode":false,"output_max_bytes":0,"output_max_lines":0}`:                 "risk.exec_push",
+		`{"argv":["terraform","destroy"],"cwd":"","env_allowlist_keys":[],"stdin_mode":"none","shell_mode":false,"output_max_bytes":0,"output_max_lines":0}`:        "risk.exec_destroy",
+		`{"argv":["kubectl","delete","pod","x"],"cwd":"","env_allowlist_keys":[],"stdin_mode":"none","shell_mode":false,"output_max_bytes":0,"output_max_lines":0}`: "risk.exec_delete",
+		`{"argv":["go","env"],"cwd":"","env_allowlist_keys":[],"stdin_mode":"none","shell_mode":false,"output_max_bytes":0,"output_max_lines":0}`:                   "risk.exec_credential_read",
+		`{"argv":["npm","install"],"cwd":"","env_allowlist_keys":[],"stdin_mode":"none","shell_mode":false,"output_max_bytes":0,"output_max_lines":0}`:              "risk.exec_package_install",
+	}
+	for raw, want := range tests {
+		flags := ComputeRiskFlags(execActionForTest(raw))
+		if !flags[want] {
+			t.Fatalf("expected %s in %+v", want, flags)
+		}
 	}
 }
 
@@ -568,7 +620,7 @@ func TestLoadBundlesVerifiesEachBundleBeforeMerge(t *testing.T) {
 	basePath := filepath.Join(dir, "base.json")
 	repoPath := filepath.Join(dir, "repo.json")
 	baseData := []byte(`{"version":"v1","rules":[{"id":"allow-read","action_type":"fs.read","resource":"file://workspace/**","decision":"ALLOW"}]}`)
-	repoData := []byte(`{"version":"v1","rules":[{"id":"require-approval-net","action_type":"net.http_request","resource":"url://example.com/**","decision":"REQUIRE_APPROVAL"}]}`)
+	repoData := []byte(`{"version":"v1","rules":[{"id":"deny-net","action_type":"net.http_request","resource":"url://example.com/**","decision":"DENY"}]}`)
 	if err := os.WriteFile(basePath, baseData, 0o600); err != nil {
 		t.Fatalf("write base bundle: %v", err)
 	}
@@ -668,5 +720,16 @@ func TestLoadBundlesRejectsDuplicateRuleIDsAcrossBundles(t *testing.T) {
 	}
 	if _, err := LoadBundles([]string{firstPath, secondPath}); err == nil || !strings.Contains(err.Error(), `duplicate rule id "shared"`) {
 		t.Fatalf("expected duplicate rule rejection, got %v", err)
+	}
+}
+
+func execActionForTest(params string) normalize.NormalizedAction {
+	return normalize.NormalizedAction{
+		ActionType:  "process.exec",
+		Resource:    "file://workspace/",
+		Principal:   "system",
+		Agent:       "prodclaw",
+		Environment: "dev",
+		Params:      []byte(params),
 	}
 }

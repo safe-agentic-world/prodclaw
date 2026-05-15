@@ -46,3 +46,13 @@ jobs:
           go run ./cmd/prodclaw policy check \
             --profile ci-standard \
             --action examples/actions/git-status.json
+
+      - name: Clean CI CLI Smoke Test
+        run: |
+          printf 'fix the build\n' > /tmp/prodclaw-task.md
+          env -i PATH="$PATH" HOME="$HOME" ./prodclaw version
+          env -i PATH="$PATH" HOME="$HOME" ./prodclaw profiles list
+          env -i PATH="$PATH" HOME="$HOME" ./prodclaw job run \
+            --agent codex \
+            --task /tmp/prodclaw-task.md \
+            --dry-run
