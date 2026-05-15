@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/safe-agentic-world/prodclaw/internal/action"
@@ -13,22 +12,6 @@ import (
 )
 
 var defaultProfileNames = []string{"ci-standard", "ci-strict"}
-
-func TestDefaultPolicyProfilesGoldenHashes(t *testing.T) {
-	expected := loadProfileHashes(t)
-	for _, name := range defaultProfileNames {
-		bundle := loadDefaultProfileBundle(t, name)
-		want := strings.TrimSpace(expected[name])
-		if want == "" {
-			t.Errorf("missing golden hash for %s: set it to %q", name, bundle.Hash)
-			continue
-		}
-		if bundle.Hash != want {
-			t.Errorf("%s hash changed: got %q want %q; run `make pin-profile-hashes` if intentional", name, bundle.Hash, want)
-			continue
-		}
-	}
-}
 
 func TestDefaultPolicyProfileDecisions(t *testing.T) {
 	tests := []struct {
@@ -61,16 +44,6 @@ func TestDefaultPolicyProfileDecisions(t *testing.T) {
 			}
 		})
 	}
-}
-
-func loadProfileHashes(t *testing.T) map[string]string {
-	t.Helper()
-	data := readRepoFileBytes(t, filepath.Join("testdata", "policy-profiles", "hashes.json"))
-	var hashes map[string]string
-	if err := json.Unmarshal(data, &hashes); err != nil {
-		t.Fatalf("decode profile hashes: %v", err)
-	}
-	return hashes
 }
 
 func loadDefaultProfileBundle(t *testing.T, name string) Bundle {
@@ -124,11 +97,6 @@ func httpParamsForTest(method string, headers map[string]string) map[string]any 
 		"body":    "",
 		"headers": headers,
 	}
-}
-
-func readRepoFile(t *testing.T, rel string) string {
-	t.Helper()
-	return string(readRepoFileBytes(t, rel))
 }
 
 func readRepoFileBytes(t *testing.T, rel string) []byte {

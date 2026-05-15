@@ -31,6 +31,8 @@ func run(args []string) int {
 		return 0
 	case "policy":
 		return runPolicy(args[1:], os.Stdout, os.Stderr)
+	case "profiles":
+		return runProfiles(args[1:], os.Stdout, os.Stderr)
 	case "-h", "--help", "help":
 		printHelp()
 		return 0
@@ -45,10 +47,94 @@ func printHelp() {
 	fmt.Fprintln(os.Stderr, "prodclaw commands:")
 	fmt.Fprintln(os.Stderr, "  version    print build metadata")
 	fmt.Fprintln(os.Stderr, "  policy     check or explain policy decisions")
+	fmt.Fprintln(os.Stderr, "  profiles   inspect built-in profiles")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "planned:")
 	fmt.Fprintln(os.Stderr, "  job run    run Codex or Claude Code in a governed CI boundary")
 	fmt.Fprintln(os.Stderr, "  mcp        start the ProdClaw MCP stdio server")
+}
+
+func runProfiles(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		printProfilesHelp(stderr)
+		if len(args) == 0 {
+			return 2
+		}
+		return 0
+	}
+	var err error
+	switch args[0] {
+	case "list":
+		err = executeProfilesList(args[1:], stdout, stderr)
+	case "show":
+		err = executeProfilesShow(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintln(stderr, "profiles command required: list|show")
+		printProfilesHelp(stderr)
+		return 2
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "profiles %s: %v\n", args[0], err)
+		return 30
+	}
+	return 0
+}
+
+func printProfilesHelp(w io.Writer) {
+	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "  prodclaw profiles list [--format text|json]")
+	fmt.Fprintln(w, "  prodclaw profiles show <name> [--format yaml|json]")
+}
+
+func executeProfilesList(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("profiles list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	format := fs.String("format", "text", "output format: text|json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	records, err := profiles.List()
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "text":
+		for _, record := range records {
+			if _, err := fmt.Fprintf(stdout, "%-12s %s  %s\n", record.Name, record.Hash, record.Summary); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "json":
+		return writeJSON(stdout, records)
+	default:
+		return fmt.Errorf("--format must be text or json")
+	}
+}
+
+func executeProfilesShow(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("profiles show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	format := fs.String("format", "yaml", "output format: yaml|json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("profile name is required")
+	}
+	record, err := profiles.Show(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "yaml":
+		_, err := stdout.Write([]byte(record.YAML))
+		return err
+	case "json":
+		return writeJSON(stdout, record)
+	default:
+		return fmt.Errorf("--format must be yaml or json")
+	}
 }
 
 func runPolicy(args []string, stdout, stderr io.Writer) int {

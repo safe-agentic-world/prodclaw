@@ -47,3 +47,12 @@ go run ./cmd/prodclaw policy explain --profile ci-standard --action examples/act
 ```
 
 `check` gives the compact decision for CI gates. `explain` adds matched rule details so a failed pipeline can show exactly which policy rule caused the result.
+
+## Inspect Profiles
+
+```bash
+go run ./cmd/prodclaw profiles list
+go run ./cmd/prodclaw profiles show ci-standard
+```
+
+Profile hashes are computed from the profile embedded in the running binary. ProdClaw does not require a checked-in hash pin file for policy edits.

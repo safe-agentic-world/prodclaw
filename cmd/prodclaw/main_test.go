@@ -21,6 +21,38 @@ func TestRunUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestProfilesListShowsBuiltInProfiles(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runProfiles([]string{"list", "--format", "json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("profiles list exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var records []struct {
+		Name string `json:"name"`
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &records); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if len(records) != 2 {
+		t.Fatalf("profile count = %d, want 2: %+v", len(records), records)
+	}
+	if records[0].Name != "ci-standard" || records[0].Hash == "" {
+		t.Fatalf("unexpected first profile: %+v", records[0])
+	}
+}
+
+func TestProfilesShowReturnsYAML(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runProfiles([]string{"show", "ci-standard"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("profiles show exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "version: v1") || !strings.Contains(stdout.String(), "ci-standard-deny-protected-branch-push") {
+		t.Fatalf("unexpected profile yaml:\n%s", stdout.String())
+	}
+}
+
 func TestPolicyCheckAllowsMatchingAction(t *testing.T) {
 	bundle, actionFile := writePolicyFixture(t, "ALLOW")
 	var stdout, stderr bytes.Buffer
