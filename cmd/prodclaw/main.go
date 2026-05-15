@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/safe-agentic-world/prodclaw/internal/action"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/normalize"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
 	"github.com/safe-agentic-world/prodclaw/internal/version"
+	"github.com/safe-agentic-world/prodclaw/profiles"
 )
 
 func main() {
@@ -71,8 +73,10 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 
 func printPolicyHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  prodclaw policy check --bundle <path> --action <path> [identity flags]")
-	fmt.Fprintln(w, "  prodclaw policy explain --bundle <path> --action <path> [identity flags]")
+	fmt.Fprintln(w, "  prodclaw policy check (--profile <name> | --bundle <path>) --action <path> [identity flags]")
+	fmt.Fprintln(w, "  prodclaw policy explain (--profile <name> | --bundle <path>) --action <path> [identity flags]")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "built-in profiles: %s\n", strings.Join(profiles.Names(), ", "))
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "identity flags:")
 	fmt.Fprintln(w, "  --principal <name>     default system")
@@ -84,12 +88,14 @@ func runPolicyDecision(args []string, stdout, stderr io.Writer, explain bool) in
 	fs := flag.NewFlagSet("policy", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var bundlePath string
+	var profileName string
 	var actionPath string
 	var principal string
 	var agent string
 	var environment string
 	fs.StringVar(&bundlePath, "bundle", "", "policy bundle path")
 	fs.StringVar(&bundlePath, "policy-bundle", "", "policy bundle path")
+	fs.StringVar(&profileName, "profile", "", "built-in profile name")
 	fs.StringVar(&actionPath, "action", "", "action json path")
 	fs.StringVar(&principal, "principal", "system", "verified principal")
 	fs.StringVar(&agent, "agent", "prodclaw", "verified agent")
@@ -100,6 +106,7 @@ func runPolicyDecision(args []string, stdout, stderr io.Writer, explain bool) in
 	}
 	result, err := evaluatePolicy(policyEvalOptions{
 		BundlePath:  bundlePath,
+		ProfileName: profileName,
 		ActionPath:  actionPath,
 		Principal:   principal,
 		Agent:       agent,
@@ -119,6 +126,7 @@ func runPolicyDecision(args []string, stdout, stderr io.Writer, explain bool) in
 
 type policyEvalOptions struct {
 	BundlePath  string
+	ProfileName string
 	ActionPath  string
 	Principal   string
 	Agent       string
@@ -145,13 +153,16 @@ type policyExplainOutput struct {
 }
 
 func evaluatePolicy(opts policyEvalOptions) (any, error) {
-	if opts.BundlePath == "" {
-		return nil, fmt.Errorf("--bundle is required")
+	if opts.BundlePath != "" && opts.ProfileName != "" {
+		return nil, fmt.Errorf("--bundle and --profile are mutually exclusive")
+	}
+	if opts.BundlePath == "" && opts.ProfileName == "" {
+		return nil, fmt.Errorf("--bundle or --profile is required")
 	}
 	if opts.ActionPath == "" {
 		return nil, fmt.Errorf("--action is required")
 	}
-	bundle, err := policy.LoadBundle(opts.BundlePath)
+	bundle, err := loadPolicyBundle(opts)
 	if err != nil {
 		return nil, fmt.Errorf("load bundle: %w", err)
 	}
@@ -196,6 +207,13 @@ func evaluatePolicy(opts policyEvalOptions) (any, error) {
 		ExecAuthorization:      details.ExecAuthorization,
 		MatchedRuleProvenance:  details.MatchedRuleProvenance,
 	}, nil
+}
+
+func loadPolicyBundle(opts policyEvalOptions) (policy.Bundle, error) {
+	if opts.ProfileName != "" {
+		return profiles.Load(opts.ProfileName)
+	}
+	return policy.LoadBundle(opts.BundlePath)
 }
 
 func writeJSON(w io.Writer, value any) error {

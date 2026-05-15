@@ -44,5 +44,5 @@ jobs:
       - name: Policy Smoke Test
         run: |
           go run ./cmd/prodclaw policy check \
-            --bundle profiles/ci-strict.yaml \
+            --profile ci-standard \
             --action examples/actions/git-status.json

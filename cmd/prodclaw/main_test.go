@@ -65,8 +65,36 @@ func TestPolicyCheckMissingBundleFailsClosed(t *testing.T) {
 	if code != 30 {
 		t.Fatalf("policy check exit code = %d, want 30", code)
 	}
-	if !strings.Contains(stderr.String(), "--bundle is required") {
+	if !strings.Contains(stderr.String(), "--bundle or --profile is required") {
 		t.Fatalf("expected bundle error, got %q", stderr.String())
+	}
+}
+
+func TestPolicyCheckUsesBuiltInProfile(t *testing.T) {
+	_, actionFile := writePolicyFixture(t, "ALLOW")
+	var stdout, stderr bytes.Buffer
+	code := runPolicy([]string{"check", "--profile", "ci-standard", "--action", actionFile}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("policy check exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got policyCheckOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if got.Decision != "ALLOW" {
+		t.Fatalf("decision = %s, want ALLOW: %+v", got.Decision, got)
+	}
+}
+
+func TestPolicyCheckRejectsBundleAndProfileTogether(t *testing.T) {
+	bundle, actionFile := writePolicyFixture(t, "ALLOW")
+	var stdout, stderr bytes.Buffer
+	code := runPolicy([]string{"check", "--bundle", bundle, "--profile", "ci-standard", "--action", actionFile}, &stdout, &stderr)
+	if code != 30 {
+		t.Fatalf("policy check exit code = %d, want 30", code)
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("expected mutual exclusion error, got %q", stderr.String())
 	}
 }
 

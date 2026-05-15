@@ -12,7 +12,7 @@ import (
 	"github.com/safe-agentic-world/prodclaw/internal/normalize"
 )
 
-var defaultProfileNames = []string{"ci-strict"}
+var defaultProfileNames = []string{"ci-standard", "ci-strict"}
 
 func TestDefaultPolicyProfilesGoldenHashes(t *testing.T) {
 	expected := loadProfileHashes(t)
@@ -46,6 +46,11 @@ func TestDefaultPolicyProfileDecisions(t *testing.T) {
 		{name: "ci strict allows go test", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("go", "test", "./..."), want: DecisionAllow},
 		{name: "ci strict allows structured publish", profile: "ci-strict", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("prodclaw", "publish-artifact", "dist/app.tgz"), want: DecisionAllow},
 		{name: "ci strict denies unknown egress by default", profile: "ci-strict", actionType: "net.http_request", resource: "url://unknown.example.com/api", params: httpParamsForTest("GET", nil), want: DecisionDeny},
+		{name: "ci standard denies dotenv", profile: "ci-standard", actionType: "fs.read", resource: "file://workspace/.env", params: map[string]any{"resource": ".env"}, want: DecisionDeny},
+		{name: "ci standard allows git status", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("git", "status"), want: DecisionAllow},
+		{name: "ci standard denies main branch push", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("git", "push", "origin", "main"), want: DecisionDeny},
+		{name: "ci standard allows feature branch push", profile: "ci-standard", actionType: "process.exec", resource: "file://workspace/", params: execParamsForTest("git", "push", "origin", "HEAD:refs/heads/ai-dev-agent/ACDK-1"), want: DecisionAllow},
+		{name: "ci standard allows merge request create", profile: "ci-standard", actionType: "net.http_request", resource: "url://gitlab.com/api/v4/projects/123/merge_requests", params: httpParamsForTest("POST", map[string]string{"PRIVATE-TOKEN": "redacted"}), want: DecisionAllow},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

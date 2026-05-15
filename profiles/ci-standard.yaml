@@ -1,0 +1,184 @@
+version: v1
+rules:
+  # CI must never read common local secret material.
+  - id: ci-standard-deny-dotenv-read
+    action_type: fs.read
+    resource: file://workspace/**/.env*
+    decision: DENY
+
+  - id: ci-standard-deny-private-key-read
+    action_type: fs.read
+    resource: file://workspace/**/*.key
+    decision: DENY
+
+  - id: ci-standard-deny-ssh-material-read
+    action_type: fs.read
+    resource: file://workspace/**/.ssh/**
+    decision: DENY
+
+  - id: ci-standard-deny-cloud-credentials-read
+    action_type: fs.read
+    resource: file://workspace/**/.aws/credentials
+    decision: DENY
+
+  # CI agents must not push directly to protected branches.
+  - id: ci-standard-deny-protected-branch-push
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["git", "push", "**", "main"]
+        - ["git", "push", "**", "master"]
+        - ["git", "push", "**", "HEAD:main"]
+        - ["git", "push", "**", "HEAD:master"]
+        - ["git", "push", "**", "HEAD:refs/heads/main"]
+        - ["git", "push", "**", "HEAD:refs/heads/master"]
+        - ["git", "push", "**", "main:main"]
+        - ["git", "push", "**", "master:master"]
+        - ["git", "push", "**", "refs/heads/main"]
+        - ["git", "push", "**", "refs/heads/master"]
+        - ["git", "push", "**", "+main"]
+        - ["git", "push", "**", "+master"]
+        - ["git", "push", "**", "+HEAD:main"]
+        - ["git", "push", "**", "+HEAD:master"]
+        - ["git", "push", "**", "+HEAD:refs/heads/main"]
+        - ["git", "push", "**", "+HEAD:refs/heads/master"]
+
+  - id: ci-standard-deny-history-rewrite
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["git", "push", "**", "--force"]
+        - ["git", "push", "**", "--force-with-lease"]
+        - ["git", "reset", "--hard"]
+        - ["git", "rebase"]
+        - ["git", "rebase", "**"]
+
+  - id: ci-standard-deny-infra-mutations
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["terraform", "apply"]
+        - ["terraform", "apply", "**"]
+        - ["terraform", "destroy"]
+        - ["terraform", "destroy", "**"]
+        - ["kubectl", "apply"]
+        - ["kubectl", "apply", "**"]
+        - ["kubectl", "delete"]
+        - ["kubectl", "delete", "**"]
+        - ["helm", "upgrade"]
+        - ["helm", "upgrade", "**"]
+
+  # Allow normal repository work for a fix-and-MR CI agent.
+  - id: ci-standard-allow-workspace-read
+    action_type: fs.read
+    resource: file://workspace/**
+    decision: ALLOW
+
+  - id: ci-standard-allow-workspace-write
+    action_type: fs.write
+    resource: file://workspace/**
+    decision: ALLOW
+    obligations:
+      sandbox_mode: ci
+
+  - id: ci-standard-allow-patches
+    action_type: repo.apply_patch
+    resource: repo://local/workspace
+    decision: ALLOW
+    obligations:
+      sandbox_mode: ci
+
+  - id: ci-standard-allow-git-readonly
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["git", "status"]
+        - ["git", "status", "**"]
+        - ["git", "diff"]
+        - ["git", "diff", "**"]
+        - ["git", "log"]
+        - ["git", "log", "**"]
+        - ["git", "show"]
+        - ["git", "show", "**"]
+        - ["git", "branch"]
+        - ["git", "branch", "**"]
+    obligations:
+      sandbox_mode: ci
+
+  - id: ci-standard-allow-git-branch-work
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["git", "checkout", "-b", "*"]
+        - ["git", "checkout", "-B", "*", "*"]
+        - ["git", "switch", "-c", "*"]
+        - ["git", "add", "**"]
+        - ["git", "commit", "**"]
+    obligations:
+      sandbox_mode: ci
+
+  # Deny rules above still win for main/master; this allows feature branch pushes.
+  - id: ci-standard-allow-feature-branch-push
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["git", "push", "origin", "*"]
+        - ["git", "push", "origin", "HEAD:*"]
+        - ["git", "push", "origin", "HEAD:refs/heads/*"]
+    obligations:
+      sandbox_mode: ci
+
+  - id: ci-standard-allow-common-validation
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["go", "test", "**"]
+        - ["go", "build", "**"]
+        - ["go", "vet", "**"]
+        - ["npm", "test"]
+        - ["npm", "run", "test"]
+        - ["npm", "run", "lint"]
+        - ["npm", "run", "build"]
+        - ["python", "-m", "pytest", "**"]
+        - ["pytest", "**"]
+    obligations:
+      sandbox_mode: ci
+
+  # CI may create merge requests but must not pass Authorization headers through policy fixtures.
+  - id: ci-standard-deny-authenticated-http
+    action_type: net.http_request
+    resource: url://**/**
+    decision: DENY
+    params_match:
+      headers.Authorization:
+        present: true
+
+  - id: ci-standard-allow-readonly-http
+    action_type: net.http_request
+    resource: url://**/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["", "GET", "HEAD"]
+
+  - id: ci-standard-allow-gitlab-merge-request-create
+    action_type: net.http_request
+    resource: url://gitlab.com/api/v4/projects/**/merge_requests
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["POST"]

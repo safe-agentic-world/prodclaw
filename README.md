@@ -42,8 +42,8 @@ Versioned binaries are published from GitHub tags. Create a tag like `v0.1.0` to
 ## Try Policy Checks
 
 ```bash
-go run ./cmd/prodclaw policy check --bundle profiles/ci-strict.yaml --action examples/actions/git-status.json
-go run ./cmd/prodclaw policy explain --bundle profiles/ci-strict.yaml --action examples/actions/git-status.json
+go run ./cmd/prodclaw policy check --profile ci-standard --action examples/actions/git-status.json
+go run ./cmd/prodclaw policy explain --profile ci-standard --action examples/actions/git-status.json
 ```
 
 `check` gives the compact decision for CI gates. `explain` adds matched rule details so a failed pipeline can show exactly which policy rule caused the result.
