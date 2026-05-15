@@ -1,0 +1,76 @@
+version: v1
+rules:
+  - id: safe-deny-root-env
+    action_type: fs.read
+    resource: file://workspace/.env
+    decision: DENY
+  - id: safe-deny-nested-env
+    action_type: fs.read
+    resource: file://workspace/**/.env
+    decision: DENY
+  - id: safe-deny-root-env-variants
+    action_type: fs.read
+    resource: file://workspace/.env.*
+    decision: DENY
+  - id: safe-deny-nested-env-variants
+    action_type: fs.read
+    resource: file://workspace/**/.env.*
+    decision: DENY
+  - id: safe-deny-root-pem
+    action_type: fs.read
+    resource: file://workspace/*.pem
+    decision: DENY
+  - id: safe-deny-nested-pem
+    action_type: fs.read
+    resource: file://workspace/**/*.pem
+    decision: DENY
+  - id: safe-deny-root-key
+    action_type: fs.read
+    resource: file://workspace/*.key
+    decision: DENY
+  - id: safe-deny-nested-key
+    action_type: fs.read
+    resource: file://workspace/**/*.key
+    decision: DENY
+  - id: safe-deny-root-python
+    action_type: fs.read
+    resource: file://workspace/*.py
+    decision: DENY
+  - id: safe-deny-nested-python
+    action_type: fs.read
+    resource: file://workspace/**/*.py
+    decision: DENY
+  - id: safe-read-workspace
+    action_type: fs.read
+    resource: file://workspace/**
+    decision: ALLOW
+  - id: safe-write-workspace
+    action_type: fs.write
+    resource: file://workspace/**
+    decision: ALLOW
+    obligations:
+      sandbox_mode: local
+  - id: safe-apply-patch
+    action_type: repo.apply_patch
+    resource: repo://local/workspace
+    decision: ALLOW
+    obligations:
+      sandbox_mode: local
+  - id: safe-deny-git-push
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["git", "push", "**"]
+        - ["git", "push"]
+  - id: safe-allow-git-exec
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["git", "**"]
+        - ["git"]
+    obligations:
+      sandbox_mode: local

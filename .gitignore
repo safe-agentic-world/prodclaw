@@ -16,6 +16,20 @@
 coverage.*
 *.coverprofile
 profile.cov
+test-results/
+artifacts/
+tmp/
+temp/
+
+# Local Go build/test cache directories if redirected into the repo
+.gocache/
+.gomodcache/
+.gotmp/
+go-build*/
+
+# Local binaries produced by `go build`
+/prodclaw
+/prodclaw.exe
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
@@ -30,3 +44,5 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+TASKS.md

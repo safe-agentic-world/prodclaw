@@ -1,0 +1,61 @@
+version: v1
+rules:
+  - id: allow-upstream-order-view
+    action_type: mcp.call
+    resource: mcp://retail/get_order_details
+    decision: ALLOW
+    principals: ["system"]
+    agents: ["ProdClaw"]
+    environments: ["dev"]
+
+  - id: require-approval-upstream-refund
+    action_type: mcp.call
+    resource: mcp://retail/request_refund
+    decision: REQUIRE_APPROVAL
+    principals: ["system"]
+    agents: ["ProdClaw"]
+    environments: ["dev"]
+    obligations:
+      approval_scope_class: action_type_resource
+
+  - id: deny-upstream-compensation
+    action_type: mcp.call
+    resource: mcp://retail/issue_compensation
+    decision: DENY
+    principals: ["system"]
+    agents: ["ProdClaw"]
+    environments: ["dev"]
+
+  - id: allow-upstream-resource-read
+    action_type: mcp.resource_read
+    resource: mcp://retail/resource/note://retail/customer-42
+    decision: ALLOW
+    principals: ["system"]
+    agents: ["ProdClaw"]
+    environments: ["dev"]
+
+  - id: allow-upstream-prompt-get
+    action_type: mcp.prompt_get
+    resource: mcp://retail/prompt/incident.summary
+    decision: ALLOW
+    principals: ["system"]
+    agents: ["ProdClaw"]
+    environments: ["dev"]
+
+  - id: allow-upstream-completion
+    action_type: mcp.completion
+    resource: mcp://retail/completion/ref/prompt/incident.summary
+    decision: ALLOW
+    principals: ["system"]
+    agents: ["ProdClaw"]
+    environments: ["dev"]
+
+  - id: require-approval-upstream-sampling
+    action_type: mcp.sample
+    resource: mcp://retail/sample
+    decision: REQUIRE_APPROVAL
+    principals: ["system"]
+    agents: ["ProdClaw"]
+    environments: ["dev"]
+    obligations:
+      approval_scope_class: action_type_resource
