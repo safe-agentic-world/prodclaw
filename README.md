@@ -56,3 +56,11 @@ go run ./cmd/prodclaw profiles show ci-standard
 ```
 
 Profile hashes are computed from the profile embedded in the running binary. ProdClaw does not require a checked-in hash pin file for policy edits.
+
+## Run As An MCP Boundary
+
+```bash
+prodclaw mcp --profile ci-standard --workspace . --audit artifacts/prodclaw/audit.jsonl
+```
+
+The MCP server exposes governed `read_file`, `write_file`, `apply_patch`, `run_command`, and `http_request` tools. Every tool call is converted into a ProdClaw action, evaluated against policy, and recorded in the audit log before execution.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/safe-agentic-world/prodclaw/internal/action"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
+	"github.com/safe-agentic-world/prodclaw/internal/mcp"
 	"github.com/safe-agentic-world/prodclaw/internal/normalize"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
 	"github.com/safe-agentic-world/prodclaw/internal/version"
@@ -33,6 +35,8 @@ func run(args []string) int {
 		return runPolicy(args[1:], os.Stdout, os.Stderr)
 	case "profiles":
 		return runProfiles(args[1:], os.Stdout, os.Stderr)
+	case "mcp":
+		return runMCP(args[1:], os.Stdin, os.Stdout, os.Stderr)
 	case "-h", "--help", "help":
 		printHelp()
 		return 0
@@ -48,10 +52,60 @@ func printHelp() {
 	fmt.Fprintln(os.Stderr, "  version    print build metadata")
 	fmt.Fprintln(os.Stderr, "  policy     check or explain policy decisions")
 	fmt.Fprintln(os.Stderr, "  profiles   inspect built-in profiles")
+	fmt.Fprintln(os.Stderr, "  mcp        start governed MCP stdio server")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "planned:")
 	fmt.Fprintln(os.Stderr, "  job run    run Codex or Claude Code in a governed CI boundary")
-	fmt.Fprintln(os.Stderr, "  mcp        start the ProdClaw MCP stdio server")
+}
+
+func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var bundlePath string
+	var profileName string
+	var workspace string
+	var auditPath string
+	var principal string
+	var agent string
+	var environment string
+	fs.StringVar(&bundlePath, "bundle", "", "policy bundle path")
+	fs.StringVar(&bundlePath, "policy-bundle", "", "policy bundle path")
+	fs.StringVar(&profileName, "profile", "", "built-in profile name")
+	fs.StringVar(&workspace, "workspace", ".", "workspace root")
+	fs.StringVar(&auditPath, "audit", "", "audit jsonl path")
+	fs.StringVar(&principal, "principal", "system", "verified principal")
+	fs.StringVar(&agent, "agent", "prodclaw", "verified agent")
+	fs.StringVar(&environment, "environment", "ci", "verified environment")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if bundlePath == "" && profileName == "" {
+		profileName = "ci-standard"
+	}
+	bundle, err := loadPolicyBundle(policyEvalOptions{BundlePath: bundlePath, ProfileName: profileName})
+	if err != nil {
+		fmt.Fprintf(stderr, "mcp: load bundle: %v\n", err)
+		return 30
+	}
+	server, err := mcp.NewServer(mcp.Options{
+		Bundle:    bundle,
+		Workspace: workspace,
+		AuditPath: auditPath,
+		Identity: identity.VerifiedIdentity{
+			Principal:   principal,
+			Agent:       agent,
+			Environment: environment,
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "mcp: %v\n", err)
+		return 30
+	}
+	if err := server.Serve(context.Background(), stdin, stdout); err != nil {
+		fmt.Fprintf(stderr, "mcp: %v\n", err)
+		return 40
+	}
+	return 0
 }
 
 func runProfiles(args []string, stdout, stderr io.Writer) int {
