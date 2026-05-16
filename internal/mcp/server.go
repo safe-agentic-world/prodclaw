@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,6 +74,7 @@ type rpcError struct {
 type toolCallParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
+	Input     json.RawMessage `json:"input"`
 }
 
 type commandResult struct {
@@ -146,21 +148,36 @@ func NewServer(opts Options) (*Server, error) {
 }
 
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
-	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	enc := json.NewEncoder(out)
-	for scanner.Scan() {
+	reader := bufio.NewReader(in)
+	writer := bufio.NewWriter(out)
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
+
+		first, err := reader.Peek(1)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+
+		var payload []byte
+		framed := false
+		if first[0] == 'C' || first[0] == 'c' {
+			payload, err = readFramedPayload(reader)
+			framed = true
+		} else {
+			payload, err = readJSONLine(reader)
+		}
+		if err != nil {
+			return err
 		}
 		var req rpcRequest
-		if err := json.Unmarshal(line, &req); err != nil {
+		if err := json.Unmarshal(bytes.TrimSpace(payload), &req); err != nil {
 			continue
 		}
 		if len(req.ID) == 0 {
@@ -168,11 +185,15 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			continue
 		}
 		resp := s.handleRequest(ctx, req)
-		if err := enc.Encode(resp); err != nil {
+		if framed {
+			err = writeFramedPayload(writer, resp)
+		} else {
+			err = writeJSONLine(writer, resp)
+		}
+		if err != nil {
 			return err
 		}
 	}
-	return scanner.Err()
 }
 
 func (s *Server) handleNotification(req rpcRequest) error {
@@ -204,11 +225,21 @@ func (s *Server) dispatch(ctx context.Context, req rpcRequest) (any, error) {
 	case "tools/list":
 		return map[string]any{"tools": toolDefinitions()}, nil
 	case "tools/call":
-		var params toolCallParams
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			return nil, fmt.Errorf("invalid tools/call params: %w", err)
+		name, args, err := parseToolCallParams(req.Params)
+		if err != nil {
+			return map[string]any{
+				"content": []map[string]string{{"type": "text", "text": err.Error()}},
+				"isError": true,
+			}, nil
 		}
-		return s.callTool(ctx, params.Name, params.Arguments)
+		result, err := s.callTool(ctx, name, args)
+		if err != nil {
+			return map[string]any{
+				"content": []map[string]string{{"type": "text", "text": err.Error()}},
+				"isError": true,
+			}, nil
+		}
+		return result, nil
 	case "ping":
 		return map[string]any{}, nil
 	default:
@@ -222,6 +253,101 @@ func decodeID(raw json.RawMessage) any {
 		return string(raw)
 	}
 	return id
+}
+
+func parseToolCallParams(raw json.RawMessage) (string, json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return "", nil, errors.New("invalid tools/call params")
+	}
+	var params toolCallParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return "", nil, fmt.Errorf("invalid tools/call params: %w", err)
+	}
+	name := strings.TrimSpace(params.Name)
+	if name == "" {
+		return "", nil, errors.New("invalid tools/call params: name is required")
+	}
+	if len(bytes.TrimSpace(params.Arguments)) > 0 {
+		return name, params.Arguments, nil
+	}
+	if len(bytes.TrimSpace(params.Input)) > 0 {
+		return name, params.Input, nil
+	}
+	return name, json.RawMessage(`{}`), nil
+}
+
+func readJSONLine(reader *bufio.Reader) ([]byte, error) {
+	line, err := reader.ReadBytes('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(line)) == 0 {
+		if errors.Is(err, io.EOF) {
+			return nil, io.EOF
+		}
+		return readJSONLine(reader)
+	}
+	return line, nil
+}
+
+func readFramedPayload(reader *bufio.Reader) ([]byte, error) {
+	headers := map[string]string{}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			return nil, errors.New("invalid framed header")
+		}
+		headers[strings.ToLower(strings.TrimSpace(parts[0]))] = strings.TrimSpace(parts[1])
+	}
+	lengthRaw := headers["content-length"]
+	if lengthRaw == "" {
+		return nil, errors.New("missing content-length")
+	}
+	n, err := strconv.Atoi(lengthRaw)
+	if err != nil || n < 0 || n > 4*1024*1024 {
+		return nil, errors.New("invalid content-length")
+	}
+	body := make([]byte, n)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func writeFramedPayload(writer *bufio.Writer, payload rpcResponse) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "Content-Length: %d\r\n\r\n", len(data)); err != nil {
+		return err
+	}
+	if _, err := writer.Write(data); err != nil {
+		return err
+	}
+	return writer.Flush()
+}
+
+func writeJSONLine(writer *bufio.Writer, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(data); err != nil {
+		return err
+	}
+	if err := writer.WriteByte('\n'); err != nil {
+		return err
+	}
+	return writer.Flush()
 }
 
 func toolDefinitions() []map[string]any {

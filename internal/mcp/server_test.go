@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -62,6 +64,83 @@ func TestServerAllowsAndDeniesRunCommand(t *testing.T) {
 	}
 	if len(executed) != 1 || strings.Join(executed[0], " ") != "git status" {
 		t.Fatalf("executed commands = %+v, want only git status", executed)
+	}
+}
+
+func TestServerAcceptsToolInputAlias(t *testing.T) {
+	bundle, err := profiles.Load("ci-standard")
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	server.commandExec = func(ctx context.Context, workspace string, req commandRequest) commandResult {
+		return commandResult{Stdout: "ok\n"}
+	}
+	in := strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"input\":{\"argv\":[\"git\",\"status\"]}}}\n")
+	var out bytes.Buffer
+	if err := server.Serve(context.Background(), in, &out); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	resp := decodeResponse(t, strings.TrimSpace(out.String()))
+	if resp.Error != nil {
+		t.Fatalf("unexpected protocol error: %+v", resp.Error)
+	}
+	payload := mustMarshal(t, resp.Result)
+	if !strings.Contains(payload, `"isError":false`) || !strings.Contains(payload, `"result_code":"success"`) {
+		t.Fatalf("expected successful input-alias response, got %s", payload)
+	}
+}
+
+func TestServerReturnsToolErrorsInsideToolsCallResult(t *testing.T) {
+	bundle, err := profiles.Load("ci-standard")
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	in := strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\"}}\n")
+	var out bytes.Buffer
+	if err := server.Serve(context.Background(), in, &out); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	resp := decodeResponse(t, strings.TrimSpace(out.String()))
+	if resp.Error != nil {
+		t.Fatalf("expected MCP tool result, got protocol error: %+v", resp.Error)
+	}
+	payload := mustMarshal(t, resp.Result)
+	if !strings.Contains(payload, `"isError":true`) || !strings.Contains(payload, `argv is required`) {
+		t.Fatalf("expected structured tools/call error, got %s", payload)
+	}
+}
+
+func TestServerSupportsFramedStdio(t *testing.T) {
+	bundle, err := profiles.Load("ci-standard")
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	var in bytes.Buffer
+	writeFramedRequest(t, &in, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params":  map[string]any{},
+	})
+	var out bytes.Buffer
+	if err := server.Serve(context.Background(), &in, &out); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	resp := readFramedResponse(t, bufio.NewReader(bytes.NewReader(out.Bytes())))
+	if resp["error"] != nil {
+		t.Fatalf("unexpected framed response error: %+v", resp["error"])
 	}
 }
 
@@ -383,6 +462,51 @@ func mustBundle(t *testing.T, data string) policy.Bundle {
 		t.Fatalf("load bundle: %v", err)
 	}
 	return bundle
+}
+
+func writeFramedRequest(t *testing.T, out *bytes.Buffer, payload map[string]any) {
+	t.Helper()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal framed request: %v", err)
+	}
+	if _, err := fmt.Fprintf(out, "Content-Length: %d\r\n\r\n", len(data)); err != nil {
+		t.Fatalf("write framed header: %v", err)
+	}
+	if _, err := out.Write(data); err != nil {
+		t.Fatalf("write framed body: %v", err)
+	}
+}
+
+func readFramedResponse(t *testing.T, reader *bufio.Reader) map[string]any {
+	t.Helper()
+	header, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read framed header: %v", err)
+	}
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(header)), "content-length:") {
+		t.Fatalf("missing content-length header: %q", header)
+	}
+	parts := strings.SplitN(strings.TrimSpace(header), ":", 2)
+	if len(parts) != 2 {
+		t.Fatalf("invalid content-length header: %q", header)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		t.Fatalf("invalid content-length: %q", header)
+	}
+	if _, err := reader.ReadString('\n'); err != nil {
+		t.Fatalf("read framed separator: %v", err)
+	}
+	body := make([]byte, n)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		t.Fatalf("read framed body: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode framed body: %v body=%q", err, string(body))
+	}
+	return resp
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
