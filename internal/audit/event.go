@@ -31,6 +31,9 @@ type Event struct {
 	Retryable         bool                      `json:"retryable"`
 	RedactionSummary  executor.RedactionSummary `json:"redaction_summary"`
 	ExecCondition     string                    `json:"exec_condition,omitempty"`
+	HTTPStatusCode    int                       `json:"http_status_code,omitempty"`
+	HTTPFinalResource string                    `json:"http_final_resource,omitempty"`
+	HTTPRedirectHops  int                       `json:"http_redirect_hops,omitempty"`
 }
 
 func ValidateEventSchema(event Event) error {
@@ -53,6 +56,7 @@ func RedactEvent(event Event, redactor *redact.Redactor) Event {
 	event.Environment = redactor.RedactText(event.Environment)
 	event.ReasonCode = redactor.RedactText(event.ReasonCode)
 	event.ExecCondition = redactor.RedactText(event.ExecCondition)
+	event.HTTPFinalResource = redactor.RedactText(event.HTTPFinalResource)
 	for idx, ruleID := range event.MatchedRuleIDs {
 		event.MatchedRuleIDs[idx] = redactor.RedactText(ruleID)
 	}

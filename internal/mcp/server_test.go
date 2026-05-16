@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/safe-agentic-world/prodclaw/internal/audit"
+	"github.com/safe-agentic-world/prodclaw/internal/executor"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
 	"github.com/safe-agentic-world/prodclaw/profiles"
 )
@@ -193,6 +198,151 @@ rules:
 	}
 }
 
+func TestHTTPToolRedactsResponseAndRecordsNetworkAudit(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("Authorization: Bearer abcdefghijklmnop\nCookie: session=secret\nok\n"))
+	}))
+	defer target.Close()
+
+	host := target.Listener.Addr().String()
+	bundle := mustBundle(t, fmt.Sprintf(`version: v1
+rules:
+  - id: allow-http
+    action_type: net.http_request
+    resource: url://%s/**
+    decision: ALLOW
+    obligations:
+      output_max_lines: 3
+`, host))
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir(), AuditPath: auditPath})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	result, err := server.httpRequest(context.Background(), json.RawMessage(fmt.Sprintf(`{"url":%q,"method":"get","headers":{},"body":""}`, target.URL)))
+	if err != nil {
+		t.Fatalf("http request: %v", err)
+	}
+	payload := mustMarshal(t, result)
+	if strings.Contains(payload, "abcdefghijklmnop") || strings.Contains(payload, "session=secret") || !strings.Contains(payload, "[REDACTED]") {
+		t.Fatalf("expected redacted http response, got %s", payload)
+	}
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	var event audit.Event
+	if err := json.Unmarshal(bytes.TrimSpace(data), &event); err != nil {
+		t.Fatalf("decode audit: %v", err)
+	}
+	if event.HTTPStatusCode != http.StatusOK || event.HTTPFinalResource != "url://"+host+"/" || event.ResultCode != "success" {
+		t.Fatalf("unexpected http audit event: %+v", event)
+	}
+}
+
+func TestHTTPToolBlocksRedirectOutsideExplicitAllowlist(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer final.Close()
+	start := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL+"/done", http.StatusFound)
+	}))
+	defer start.Close()
+
+	host := start.Listener.Addr().String()
+	bundle := mustBundle(t, fmt.Sprintf(`version: v1
+rules:
+  - id: allow-start
+    action_type: net.http_request
+    resource: url://%s/**
+    decision: ALLOW
+    obligations:
+      http_redirects: true
+      http_redirect_hop_limit: 2
+      net_allowlist:
+        - %s
+`, host, host))
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	result, err := server.httpRequest(context.Background(), json.RawMessage(fmt.Sprintf(`{"url":%q,"method":"GET","headers":{},"body":""}`, start.URL)))
+	if err != nil {
+		t.Fatalf("http request: %v", err)
+	}
+	payload := mustMarshal(t, result)
+	if !strings.Contains(payload, `"result_code":"denied_policy"`) || !strings.Contains(payload, `"isError":true`) {
+		t.Fatalf("expected redirect denial result, got %s", payload)
+	}
+}
+
+func TestHTTPToolDeniedSensitiveHeadersDoNotLeakToAudit(t *testing.T) {
+	bundle, err := profiles.Load("ci-strict")
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir(), AuditPath: auditPath})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	result, err := server.httpRequest(context.Background(), json.RawMessage(`{"url":"https://github.com/api","method":"GET","headers":{"authorization":"Bearer abcdefghijklmnop","cookie":"session=secret"},"body":""}`))
+	if err != nil {
+		t.Fatalf("http request: %v", err)
+	}
+	payload := mustMarshal(t, result)
+	if !strings.Contains(payload, `"result_code":"denied_policy"`) || !strings.Contains(payload, `"isError":true`) {
+		t.Fatalf("expected sensitive-header denial, got %s", payload)
+	}
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if strings.Contains(string(data), "abcdefghijklmnop") || strings.Contains(string(data), "session=secret") {
+		t.Fatalf("sensitive headers leaked to audit: %s", string(data))
+	}
+	var event audit.Event
+	if err := json.Unmarshal(bytes.TrimSpace(data), &event); err != nil {
+		t.Fatalf("decode audit: %v", err)
+	}
+	if event.Decision != policy.DecisionDeny || event.ResultCode != "denied_policy" {
+		t.Fatalf("unexpected denied network audit event: %+v", event)
+	}
+}
+
+func TestHTTPToolRejectsOversizedRequestBeforeTransport(t *testing.T) {
+	bundle := mustBundle(t, `version: v1
+rules:
+  - id: allow-http
+    action_type: net.http_request
+    resource: url://example.com/**
+    decision: ALLOW
+    obligations:
+      http_request_max_bytes: 3
+`)
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	server.httpRunner = executor.NewHTTPRunner(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("should-not-run")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})})
+	result, err := server.httpRequest(context.Background(), json.RawMessage(`{"url":"https://example.com/path","method":"POST","headers":{},"body":"abcd"}`))
+	if err != nil {
+		t.Fatalf("http request: %v", err)
+	}
+	payload := mustMarshal(t, result)
+	if !strings.Contains(payload, `"result_code":"invalid_request"`) || !strings.Contains(payload, `"isError":true`) {
+		t.Fatalf("expected oversized request failure, got %s", payload)
+	}
+}
+
 func TestCommandEnvironmentUsesSafeBaselinePlusExplicitAllowlist(t *testing.T) {
 	t.Setenv("PATH", "safe-path")
 	t.Setenv("HOME", "safe-home")
@@ -233,4 +383,10 @@ func mustBundle(t *testing.T, data string) policy.Bundle {
 		t.Fatalf("load bundle: %v", err)
 	}
 	return bundle
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }

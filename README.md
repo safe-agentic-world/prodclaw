@@ -83,3 +83,5 @@ prodclaw mcp --profile ci-standard --workspace . --audit artifacts/prodclaw/audi
 ```
 
 The MCP server exposes governed `read_file`, `write_file`, `apply_patch`, `run_command`, `http_request`, `call_tool`, and `write_artifact` tools. Every tool call is converted into a ProdClaw action, evaluated against policy, and recorded in the audit log with the final execution result.
+
+Network actions are deny-by-default. HTTP requests normalize method, host, path, port, and header names before policy evaluation; redirects are disabled unless policy opts in with an explicit `net_allowlist`, and response bodies are capped and redacted before they reach the agent.

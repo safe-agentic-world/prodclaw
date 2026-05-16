@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/safe-agentic-world/prodclaw/internal/action"
+	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/normalize"
 )
 
@@ -96,6 +98,40 @@ func TestPolicyMatchesPrincipalsAndRiskFlags(t *testing.T) {
 	})
 	if denyDecision.Decision != DecisionDeny {
 		t.Fatalf("expected deny, got %s", denyDecision.Decision)
+	}
+}
+
+func TestPolicyHTTPMatchingUsesNormalizedMethodHostPathAndPort(t *testing.T) {
+	bundle := Bundle{
+		Version: "v1",
+		Hash:    "bundle-hash",
+		Rules: []Rule{
+			{
+				ID:         "allow-api-post",
+				ActionType: "net.http_request",
+				Resource:   "url://api.example.com:8443/v1/**",
+				Decision:   DecisionAllow,
+				ParamsMatch: map[string]any{
+					"method": map[string]any{"in": []any{"POST"}},
+				},
+			},
+		},
+	}
+	act := mustNormalizedAction(t, "net.http_request", "url://API.EXAMPLE.COM:8443/v1/items", `{"method":"post","headers":{},"body":""}`)
+	if got := NewEngine(bundle).Evaluate(act); got.Decision != DecisionAllow {
+		t.Fatalf("expected normalized host/path/port/method allow, got %+v", got)
+	}
+	pathMiss := mustNormalizedAction(t, "net.http_request", "url://api.example.com:8443/v2/items", `{"method":"POST","headers":{},"body":""}`)
+	if got := NewEngine(bundle).Evaluate(pathMiss); got.Decision != DecisionDeny {
+		t.Fatalf("expected path miss to deny, got %+v", got)
+	}
+	portMiss := mustNormalizedAction(t, "net.http_request", "url://api.example.com/v1/items", `{"method":"POST","headers":{},"body":""}`)
+	if got := NewEngine(bundle).Evaluate(portMiss); got.Decision != DecisionDeny {
+		t.Fatalf("expected port miss to deny, got %+v", got)
+	}
+	methodMiss := mustNormalizedAction(t, "net.http_request", "url://api.example.com:8443/v1/items", `{"method":"GET","headers":{},"body":""}`)
+	if got := NewEngine(bundle).Evaluate(methodMiss); got.Decision != DecisionDeny {
+		t.Fatalf("expected method miss to deny, got %+v", got)
 	}
 }
 
@@ -732,4 +768,25 @@ func execActionForTest(params string) normalize.NormalizedAction {
 		Environment: "dev",
 		Params:      []byte(params),
 	}
+}
+
+func mustNormalizedAction(t *testing.T, actionType, resource, params string) normalize.NormalizedAction {
+	t.Helper()
+	act, err := action.ToAction(action.Request{
+		SchemaVersion: "v1",
+		ActionID:      "policy-http-test",
+		ActionType:    actionType,
+		Resource:      resource,
+		Params:        []byte(params),
+		TraceID:       "policy-http-test",
+		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
+	}, identity.VerifiedIdentity{Principal: "system", Agent: "prodclaw", Environment: "dev"})
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	normalized, err := normalize.Action(act)
+	if err != nil {
+		t.Fatalf("normalize action: %v", err)
+	}
+	return normalized
 }

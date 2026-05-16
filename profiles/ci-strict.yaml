@@ -278,6 +278,15 @@ rules:
       headers.Authorization:
         present: true
 
+  # CI must not leak browser or API cookies through HTTP.
+  - id: ci-strict-deny-http-cookie-header
+    action_type: net.http_request
+    resource: url://**/**
+    decision: DENY
+    params_match:
+      headers.Cookie:
+        present: true
+
   # CI may make read-only requests to source hosts required by validation.
   - id: ci-strict-allow-http-source-hosts
     action_type: net.http_request
@@ -286,6 +295,9 @@ rules:
     params_match:
       method:
         in: ["", "GET", "HEAD"]
+    obligations:
+      net_allowlist:
+        - github.com
 
   # CI may make read-only requests to the Go proxy for module resolution.
   - id: ci-strict-allow-http-go-proxy
@@ -295,6 +307,9 @@ rules:
     params_match:
       method:
         in: ["", "GET", "HEAD"]
+    obligations:
+      net_allowlist:
+        - proxy.golang.org
 
   # CI may upload artifacts only to the configured internal artifact endpoint.
   - id: ci-strict-allow-http-artifact-upload
@@ -304,6 +319,9 @@ rules:
     params_match:
       method:
         in: ["PUT", "POST"]
+    obligations:
+      net_allowlist:
+        - artifacts.example.internal
 
   # CI cannot check out arbitrary secrets through ProdClaw by default.
   - id: ci-strict-deny-secret-checkout

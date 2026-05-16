@@ -32,3 +32,11 @@ prodclaw job run \
 Customer bundles should encode explicit allow and deny rules for the actual CI job. If a required action is denied, update the policy deliberately; do not add human approval workflows to CI as a bypass.
 
 ProdClaw intentionally has no manual profile-hash pin file. Profile and bundle hashes are computed from the bytes loaded by the running binary or the customer bundle path.
+
+## Network Defaults
+
+Both embedded profiles deny unknown egress by default and deny requests that carry `Authorization` or `Cookie` headers after canonical header normalization.
+
+`ci-standard` adds read-only allow rules for common CI source and package hosts such as GitHub, GitLab, the Go proxy, npm, and PyPI. Redirects stay disabled unless a customer rule explicitly enables `http_redirects`; when enabled, redirect destinations must also appear in that rule's `net_allowlist`.
+
+Use `http_request_max_bytes` to cap outbound request bodies and `output_max_bytes` / `output_max_lines` to cap returned response bodies.

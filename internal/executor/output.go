@@ -29,9 +29,12 @@ type RedactionSummary struct {
 }
 
 type Outcome struct {
-	ResultCode       string
-	Retryable        bool
-	RedactionSummary RedactionSummary
+	ResultCode        string
+	Retryable         bool
+	RedactionSummary  RedactionSummary
+	HTTPStatusCode    int
+	HTTPFinalResource string
+	HTTPRedirectHops  int
 }
 
 func SanitizeOutput(redactor *redact.Redactor, text string, obligations map[string]any, requestedMaxBytes, requestedMaxLines int) (string, RedactionSummary) {
@@ -66,6 +69,10 @@ func ClassifyError(err error) (string, bool) {
 	switch {
 	case err == nil:
 		return ResultSuccess, false
+	case errors.Is(err, ErrRedirectDenied), errors.Is(err, ErrRedirectHopLimit), errors.Is(err, ErrRedirectDisallowedHost), errors.Is(err, ErrHTTPRedirectAllowlistReq):
+		return ResultDeniedPolicy, false
+	case errors.Is(err, ErrHTTPRequestTooLarge), errors.Is(err, ErrRedirectInvalidTarget):
+		return ResultInvalidRequest, false
 	case errors.Is(err, context.DeadlineExceeded):
 		return ResultTimeout, true
 	default:

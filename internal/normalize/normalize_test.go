@@ -87,6 +87,40 @@ func TestNormalizeURLHostLowercase(t *testing.T) {
 	}
 }
 
+func TestNormalizeHTTPParamsCanonicalizesMethodAndHeaderNames(t *testing.T) {
+	result, err := Action(action.Action{
+		SchemaVersion: "v1",
+		ActionID:      "act-http",
+		ActionType:    "net.http_request",
+		Resource:      "url://Example.COM:443/path",
+		Params:        []byte(`{"method":"get","headers":{"authorization":"Bearer secret","cookie":"session=abc"},"body":""}`),
+		Principal:     "system",
+		Agent:         "prodclaw",
+		Environment:   "dev",
+		TraceID:       "trace-http",
+		Context:       action.Context{},
+	})
+	if err != nil {
+		t.Fatalf("normalize http action: %v", err)
+	}
+	if string(result.Params) != `{"body":"","headers":{"Authorization":"Bearer secret","Cookie":"session=abc"},"method":"GET"}` {
+		t.Fatalf("unexpected normalized http params: %s", string(result.Params))
+	}
+}
+
+func TestNormalizeHTTPRequestTargetPreservesExecutionURLButDropsQueryFromPolicyResource(t *testing.T) {
+	resource, actualURL, err := NormalizeHTTPRequestTarget("https://Example.COM:443/api/v1?token=secret")
+	if err != nil {
+		t.Fatalf("normalize http target: %v", err)
+	}
+	if resource != "url://example.com/api/v1" {
+		t.Fatalf("unexpected resource: %s", resource)
+	}
+	if actualURL != "https://Example.COM:443/api/v1?token=secret" {
+		t.Fatalf("unexpected execution url: %s", actualURL)
+	}
+}
+
 func TestNormalizeRepoLowercase(t *testing.T) {
 	result, err := Action(action.Action{
 		SchemaVersion: "v1",

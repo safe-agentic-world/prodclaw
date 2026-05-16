@@ -28,6 +28,9 @@ func TestValidateEventSchema(t *testing.T) {
 		ResultCode:        "success",
 		Retryable:         false,
 		RedactionSummary:  executor.RedactionSummary{},
+		HTTPStatusCode:    200,
+		HTTPFinalResource: "url://example.com/final",
+		HTTPRedirectHops:  1,
 	}
 	if err := ValidateEventSchema(event); err != nil {
 		t.Fatalf("validate event: %v", err)

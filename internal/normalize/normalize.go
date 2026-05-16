@@ -65,6 +65,16 @@ func Action(input action.Action) (NormalizedAction, error) {
 	if err != nil {
 		return NormalizedAction{}, fmt.Errorf("params canonicalization failed: %w", err)
 	}
+	if strings.TrimSpace(input.ActionType) == "net.http_request" {
+		canonicalParams, err = NormalizeHTTPParams(canonicalParams)
+		if err != nil {
+			return NormalizedAction{}, err
+		}
+		canonicalParams, err = canonicaljson.Canonicalize(canonicalParams)
+		if err != nil {
+			return NormalizedAction{}, fmt.Errorf("http params canonicalization failed: %w", err)
+		}
+	}
 	paramsHash := canonicaljson.HashSHA256(canonicalParams)
 	return NormalizedAction{
 		SchemaVersion: input.SchemaVersion,

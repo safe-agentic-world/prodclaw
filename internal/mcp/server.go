@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +33,7 @@ type Server struct {
 	artifactDir string
 	auditPath   string
 	id          identity.VerifiedIdentity
-	httpClient  *http.Client
+	httpRunner  *executor.HTTPRunner
 	redactor    *redact.Redactor
 	forwardTool ToolForwarder
 	commandExec func(context.Context, string, commandRequest) commandResult
@@ -141,9 +140,7 @@ func NewServer(opts Options) (*Server, error) {
 		id:          id,
 		redactor:    redactor,
 		forwardTool: opts.ForwardTool,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		httpRunner:  executor.NewHTTPRunner(nil),
 		commandExec: runCommand,
 	}, nil
 }
@@ -249,10 +246,12 @@ func toolDefinitions() []map[string]any {
 			"output_max_lines":   map[string]any{"type": "integer"},
 		}, []string{"argv"}),
 		tool("http_request", "Send an HTTP request through ProdClaw net.http_request policy.", map[string]any{
-			"url":     map[string]any{"type": "string"},
-			"method":  map[string]any{"type": "string"},
-			"headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
-			"body":    map[string]any{"type": "string"},
+			"url":              map[string]any{"type": "string"},
+			"method":           map[string]any{"type": "string"},
+			"headers":          map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+			"body":             map[string]any{"type": "string"},
+			"output_max_bytes": map[string]any{"type": "integer"},
+			"output_max_lines": map[string]any{"type": "integer"},
 		}, []string{"url"}),
 		tool("call_tool", "Forward an upstream tool call through ProdClaw mcp.call policy.", map[string]any{
 			"server":    map[string]any{"type": "string"},
@@ -450,50 +449,60 @@ func (s *Server) runCommand(ctx context.Context, args json.RawMessage) (any, err
 }
 
 func (s *Server) httpRequest(ctx context.Context, args json.RawMessage) (any, error) {
-	var input struct {
-		URL     string            `json:"url"`
-		Method  string            `json:"method"`
-		Headers map[string]string `json:"headers"`
-		Body    string            `json:"body"`
-	}
+	var input httpRequestInput
 	if err := decodeArgs(args, &input); err != nil {
 		return nil, err
 	}
-	method := strings.ToUpper(strings.TrimSpace(input.Method))
-	if method == "" {
-		method = http.MethodGet
+	if err := validateHTTPInput(input); err != nil {
+		return nil, err
 	}
-	resource := httpResource(input.URL)
-	auth, err := s.authorize("http_request", "net.http_request", resource, map[string]any{"method": method, "headers": input.Headers})
+	resource, actualURL, err := normalize.NormalizeHTTPRequestTarget(input.URL)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := s.authorize("http_request", "net.http_request", resource, map[string]any{
+		"method":           input.Method,
+		"headers":          input.Headers,
+		"body":             input.Body,
+		"output_max_bytes": input.OutputMaxBytes,
+		"output_max_lines": input.OutputMaxLines,
+	})
 	if err != nil {
 		return nil, err
 	}
 	if auth.decision.Decision != policy.DecisionAllow {
 		return s.deniedResult(auth), nil
 	}
+	params, err := normalizedHTTPParams(auth.normalized.Params)
+	if err != nil {
+		return nil, err
+	}
 	execCtx, cancel := executor.WithTimeout(ctx, auth.decision.Obligations)
 	defer cancel()
-	actualURL := input.URL
-	if strings.HasPrefix(actualURL, "url://") {
-		actualURL = "https://" + strings.TrimPrefix(actualURL, "url://")
-	}
-	req, err := http.NewRequestWithContext(execCtx, method, actualURL, strings.NewReader(input.Body))
+	result, err := s.httpRunner.DoWithPolicy(
+		execCtx,
+		actualURL,
+		executor.HTTPParams{Method: params.Method, Body: params.Body, Header: params.Headers},
+		redirectPolicyFromObligations(auth.decision.Obligations),
+		executor.HTTPRequestLimit(auth.decision.Obligations),
+		executor.HTTPResponseLimit(auth.decision.Obligations, params.OutputMaxBytes),
+	)
 	if err != nil {
 		return s.failureResult(auth, err), nil
 	}
-	for key, value := range input.Headers {
-		req.Header.Set(key, value)
-	}
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return s.failureResult(auth, err), nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, executor.DefaultOutputMaxBytes+1))
-	if err != nil {
-		return s.failureResult(auth, err), nil
-	}
-	return s.jsonResult(auth, map[string]any{"status": resp.StatusCode, "body": string(body)}, executor.ResultSuccess, false, false, 0, 0), nil
+	return s.jsonResultWithOutcome(
+		auth,
+		map[string]any{"status": result.StatusCode, "body": result.Body},
+		executor.Outcome{
+			ResultCode:        executor.ResultSuccess,
+			HTTPStatusCode:    result.StatusCode,
+			HTTPFinalResource: result.FinalResource,
+			HTTPRedirectHops:  result.RedirectHops,
+		},
+		false,
+		params.OutputMaxBytes,
+		params.OutputMaxLines,
+	), nil
 }
 
 func (s *Server) callToolForward(ctx context.Context, args json.RawMessage) (any, error) {
@@ -650,6 +659,9 @@ func (s *Server) recordAudit(auth authorizedAction, outcome executor.Outcome) {
 		Retryable:         outcome.Retryable,
 		RedactionSummary:  outcome.RedactionSummary,
 		ExecCondition:     auth.explanation.ExecAuthorization.ConditionClass,
+		HTTPStatusCode:    outcome.HTTPStatusCode,
+		HTTPFinalResource: outcome.HTTPFinalResource,
+		HTTPRedirectHops:  outcome.HTTPRedirectHops,
 	})
 }
 
@@ -716,16 +728,6 @@ func fileResource(rel string) string {
 		return "file://workspace/"
 	}
 	return "file://workspace/" + rel
-}
-
-func httpResource(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if strings.HasPrefix(raw, "url://") {
-		return raw
-	}
-	raw = strings.TrimPrefix(raw, "https://")
-	raw = strings.TrimPrefix(raw, "http://")
-	return "url://" + raw
 }
 
 func artifactResource(rel string) string {
@@ -806,15 +808,16 @@ func (s *Server) failureJSONResult(auth authorizedAction, value any, err error, 
 }
 
 func (s *Server) textResult(auth authorizedAction, text, resultCode string, retryable, isError bool, requestedMaxBytes, requestedMaxLines int) map[string]any {
+	return s.textResultWithOutcome(auth, text, executor.Outcome{ResultCode: resultCode, Retryable: retryable}, isError, requestedMaxBytes, requestedMaxLines)
+}
+
+func (s *Server) textResultWithOutcome(auth authorizedAction, text string, outcome executor.Outcome, isError bool, requestedMaxBytes, requestedMaxLines int) map[string]any {
 	sanitized, summary := executor.SanitizeOutput(s.redactor, text, auth.decision.Obligations, requestedMaxBytes, requestedMaxLines)
-	s.recordAudit(auth, executor.Outcome{
-		ResultCode:       resultCode,
-		Retryable:        retryable,
-		RedactionSummary: summary,
-	})
+	outcome.RedactionSummary = summary
+	s.recordAudit(auth, outcome)
 	result := map[string]any{
-		"result_code": resultCode,
-		"retryable":   retryable,
+		"result_code": outcome.ResultCode,
+		"retryable":   outcome.Retryable,
 		"redaction":   summary,
 		"content":     []map[string]any{{"type": "text", "text": sanitized}},
 		"isError":     isError,
@@ -823,9 +826,13 @@ func (s *Server) textResult(auth authorizedAction, text, resultCode string, retr
 }
 
 func (s *Server) jsonResult(auth authorizedAction, value any, resultCode string, retryable, isError bool, requestedMaxBytes, requestedMaxLines int) map[string]any {
+	return s.jsonResultWithOutcome(auth, value, executor.Outcome{ResultCode: resultCode, Retryable: retryable}, isError, requestedMaxBytes, requestedMaxLines)
+}
+
+func (s *Server) jsonResultWithOutcome(auth authorizedAction, value any, outcome executor.Outcome, isError bool, requestedMaxBytes, requestedMaxLines int) map[string]any {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		return s.textResult(auth, fmt.Sprintf("%+v", value), resultCode, retryable, isError, requestedMaxBytes, requestedMaxLines)
+		return s.textResultWithOutcome(auth, fmt.Sprintf("%+v", value), outcome, isError, requestedMaxBytes, requestedMaxLines)
 	}
-	return s.textResult(auth, string(data), resultCode, retryable, isError, requestedMaxBytes, requestedMaxLines)
+	return s.textResultWithOutcome(auth, string(data), outcome, isError, requestedMaxBytes, requestedMaxLines)
 }

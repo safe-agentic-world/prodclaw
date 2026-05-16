@@ -194,6 +194,14 @@ rules:
       headers.Authorization:
         present: true
 
+  - id: ci-standard-deny-cookie-http
+    action_type: net.http_request
+    resource: url://**/**
+    decision: DENY
+    params_match:
+      headers.Cookie:
+        present: true
+
   - id: ci-standard-allow-github-readonly-http
     action_type: net.http_request
     resource: url://github.com/**
@@ -201,6 +209,9 @@ rules:
     params_match:
       method:
         in: ["", "GET", "HEAD"]
+    obligations:
+      net_allowlist:
+        - github.com
 
   - id: ci-standard-allow-gitlab-readonly-http
     action_type: net.http_request
@@ -209,6 +220,9 @@ rules:
     params_match:
       method:
         in: ["", "GET", "HEAD"]
+    obligations:
+      net_allowlist:
+        - gitlab.com
 
   - id: ci-standard-allow-go-proxy-readonly-http
     action_type: net.http_request
@@ -217,6 +231,9 @@ rules:
     params_match:
       method:
         in: ["", "GET", "HEAD"]
+    obligations:
+      net_allowlist:
+        - proxy.golang.org
 
   - id: ci-standard-allow-npm-registry-readonly-http
     action_type: net.http_request
@@ -225,6 +242,9 @@ rules:
     params_match:
       method:
         in: ["", "GET", "HEAD"]
+    obligations:
+      net_allowlist:
+        - registry.npmjs.org
 
   - id: ci-standard-allow-python-package-readonly-http
     action_type: net.http_request
@@ -233,6 +253,9 @@ rules:
     params_match:
       method:
         in: ["", "GET", "HEAD"]
+    obligations:
+      net_allowlist:
+        - pypi.org
 
   - id: ci-standard-allow-gitlab-merge-request-create
     action_type: net.http_request
@@ -241,3 +264,6 @@ rules:
     params_match:
       method:
         in: ["POST"]
+    obligations:
+      net_allowlist:
+        - gitlab.com

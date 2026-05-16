@@ -110,6 +110,19 @@
     "exec_condition": {
       "type": "string",
       "minLength": 1
+    },
+    "http_status_code": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
+    },
+    "http_final_resource": {
+      "type": "string",
+      "minLength": 1
+    },
+    "http_redirect_hops": {
+      "type": "integer",
+      "minimum": 0
     }
   }
 }
