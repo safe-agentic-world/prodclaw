@@ -817,9 +817,7 @@ func (s *Server) textResult(auth authorizedAction, text, resultCode string, retr
 		"retryable":   retryable,
 		"redaction":   summary,
 		"content":     []map[string]any{{"type": "text", "text": sanitized}},
-	}
-	if isError {
-		result["isError"] = true
+		"isError":     isError,
 	}
 	return result
 }

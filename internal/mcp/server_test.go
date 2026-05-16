@@ -44,8 +44,9 @@ func TestServerAllowsAndDeniesRunCommand(t *testing.T) {
 	if first.Error != nil {
 		t.Fatalf("allow response error: %+v", first.Error)
 	}
-	if strings.Contains(mustMarshal(t, first.Result), `"isError":true`) {
-		t.Fatalf("allow response unexpectedly errored: %+v", first.Result)
+	firstPayload := mustMarshal(t, first.Result)
+	if !strings.Contains(firstPayload, `"isError":false`) {
+		t.Fatalf("allow response missing explicit success marker: %+v", first.Result)
 	}
 	second := decodeResponse(t, lines[1])
 	if second.Error != nil {
