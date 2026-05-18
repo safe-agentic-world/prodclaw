@@ -21,6 +21,7 @@ type NormalizedAction struct {
 	Resource         string
 	Params           []byte
 	ParamsHash       string
+	ContextHash      string
 	Principal        string
 	Agent            string
 	Environment      string
@@ -38,6 +39,7 @@ type fingerprintPayload struct {
 	ActionType       string `json:"action_type"`
 	Resource         string `json:"resource"`
 	ParamsHash       string `json:"params_hash"`
+	ContextHash      string `json:"context_hash,omitempty"`
 	Principal        string `json:"principal"`
 	Agent            string `json:"agent"`
 	Environment      string `json:"environment"`
@@ -76,6 +78,10 @@ func Action(input action.Action) (NormalizedAction, error) {
 		}
 	}
 	paramsHash := canonicaljson.HashSHA256(canonicalParams)
+	contextHash, err := hashContext(input.Context)
+	if err != nil {
+		return NormalizedAction{}, err
+	}
 	return NormalizedAction{
 		SchemaVersion: input.SchemaVersion,
 		ActionID:      input.ActionID,
@@ -83,6 +89,7 @@ func Action(input action.Action) (NormalizedAction, error) {
 		Resource:      normalizedResource,
 		Params:        canonicalParams,
 		ParamsHash:    paramsHash,
+		ContextHash:   contextHash,
 		Principal:     input.Principal,
 		Agent:         input.Agent,
 		Environment:   input.Environment,
@@ -117,6 +124,7 @@ func Fingerprint(input NormalizedAction, policyBundleHash string) (string, error
 		ActionType:       input.ActionType,
 		Resource:         input.Resource,
 		ParamsHash:       input.ParamsHash,
+		ContextHash:      input.ContextHash,
 		Principal:        input.Principal,
 		Agent:            input.Agent,
 		Environment:      input.Environment,
@@ -129,6 +137,21 @@ func Fingerprint(input NormalizedAction, policyBundleHash string) (string, error
 	canonical, err := canonicaljson.Canonicalize(payload)
 	if err != nil {
 		return "", err
+	}
+	return canonicaljson.HashSHA256(canonical), nil
+}
+
+func hashContext(ctx action.Context) (string, error) {
+	if len(ctx.Extensions) == 0 {
+		return "", nil
+	}
+	encoded, err := json.Marshal(ctx)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := canonicaljson.Canonicalize(encoded)
+	if err != nil {
+		return "", fmt.Errorf("context canonicalization failed: %w", err)
 	}
 	return canonicaljson.HashSHA256(canonical), nil
 }

@@ -9,19 +9,25 @@ import (
 	"strings"
 
 	runtimeconfig "github.com/safe-agentic-world/prodclaw/internal/config"
+	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/logging"
 )
 
 type jobRunOutput struct {
-	Mode             string `json:"mode"`
-	Agent            string `json:"agent"`
-	Task             string `json:"task"`
-	Workspace        string `json:"workspace"`
-	Profile          string `json:"profile,omitempty"`
-	PolicyBundle     string `json:"policy_bundle,omitempty"`
-	PolicyBundleHash string `json:"policy_bundle_hash"`
-	PolicySource     string `json:"policy_source"`
-	LaunchPlanned    bool   `json:"launch_planned"`
+	Mode               string                             `json:"mode"`
+	Agent              string                             `json:"agent"`
+	Task               string                             `json:"task"`
+	Workspace          string                             `json:"workspace"`
+	Profile            string                             `json:"profile,omitempty"`
+	PolicyBundle       string                             `json:"policy_bundle,omitempty"`
+	PolicyBundleHash   string                             `json:"policy_bundle_hash"`
+	PolicySource       string                             `json:"policy_source"`
+	LaunchPlanned      bool                               `json:"launch_planned"`
+	ControlledCI       bool                               `json:"controlled_ci"`
+	Principal          string                             `json:"principal"`
+	Environment        string                             `json:"environment"`
+	CIIdentity         identity.CIIdentity                `json:"ci_identity,omitempty"`
+	CredentialExposure identity.CredentialExposureSummary `json:"credential_exposure,omitempty"`
 }
 
 func runJob(args []string, stdout, stderr io.Writer) int {
@@ -60,6 +66,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	var profileName string
 	var dryRun bool
 	var noLaunch bool
+	var controlledCI bool
 	fs.StringVar(&configPath, "config", "", "json config path")
 	fs.StringVar(&agent, "agent", "", "agent adapter: codex|claude")
 	fs.StringVar(&taskPath, "task", "", "task file path")
@@ -69,6 +76,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&profileName, "profile", "", "built-in profile name")
 	fs.BoolVar(&dryRun, "dry-run", false, "print launch plan without starting the agent")
 	fs.BoolVar(&noLaunch, "no-launch", false, "prepare launch plan without starting the agent")
+	fs.BoolVar(&controlledCI, "controlled-ci", false, "fail closed unless supported CI identity is complete")
 	fs.Usage = func() { printJobHelp(stderr) }
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -82,7 +90,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "job run: load config: %v\n", err)
 		return 30
 	}
-	overlayJobFlags(fs, &cfg, agent, taskPath, workspace, bundlePath, profileName)
+	overlayJobFlags(fs, &cfg, agent, taskPath, workspace, bundlePath, profileName, controlledCI)
 	agent = cfg.Agent
 	taskPath = cfg.TaskPath
 	workspace = defaultString(cfg.Workspace, ".")
@@ -133,19 +141,38 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "job run: resolve task: %v\n", err)
 		return 30
 	}
+	verifiedIdentity, err := identity.DetectRuntimeIdentity(os.LookupEnv, identity.RuntimeOptions{
+		Agent:         agent,
+		Principal:     cfg.Principal,
+		Environment:   cfg.Environment,
+		WorkspaceRoot: workspaceAbs,
+		ControlledCI:  cfg.ControlledCI,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "job run: runtime identity: %v\n", err)
+		return 40
+	}
 	output := jobRunOutput{
-		Mode:             selectJobRunMode(dryRun),
-		Agent:            strings.ToLower(strings.TrimSpace(agent)),
-		Task:             taskAbs,
-		Workspace:        workspaceAbs,
-		Profile:          profileName,
-		PolicyBundle:     bundlePath,
-		PolicyBundleHash: bundle.Hash,
-		PolicySource:     selectPolicySource(profileName),
-		LaunchPlanned:    false,
+		Mode:               selectJobRunMode(dryRun),
+		Agent:              verifiedIdentity.Agent,
+		Task:               taskAbs,
+		Workspace:          workspaceAbs,
+		Profile:            profileName,
+		PolicyBundle:       bundlePath,
+		PolicyBundleHash:   bundle.Hash,
+		PolicySource:       selectPolicySource(profileName),
+		LaunchPlanned:      false,
+		ControlledCI:       cfg.ControlledCI,
+		Principal:          verifiedIdentity.Principal,
+		Environment:        verifiedIdentity.Environment,
+		CIIdentity:         verifiedIdentity.CI,
+		CredentialExposure: verifiedIdentity.CredentialExposure,
 	}
 	_ = logging.New(stderr).Info("job.plan", map[string]any{
 		"agent":         output.Agent,
+		"principal":     output.Principal,
+		"environment":   output.Environment,
+		"ci_provider":   output.CIIdentity.Provider,
 		"profile":       output.Profile,
 		"policy_bundle": output.PolicyBundle,
 		"workspace":     output.Workspace,
@@ -158,7 +185,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, workspace, bundlePath, profileName string) {
+func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, workspace, bundlePath, profileName string, controlledCI bool) {
 	if flagWasSet(fs, "agent") {
 		cfg.Agent = agent
 	}
@@ -173,6 +200,9 @@ func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPat
 	}
 	if flagWasSet(fs, "profile") {
 		cfg.Profile = profileName
+	}
+	if flagWasSet(fs, "controlled-ci") {
+		cfg.ControlledCI = controlledCI
 	}
 }
 

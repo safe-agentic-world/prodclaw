@@ -390,6 +390,83 @@ func TestPolicyParamsMatchUsesCanonicalParams(t *testing.T) {
 	}
 }
 
+func TestPolicyIdentityMatchUsesVerifiedContext(t *testing.T) {
+	bundle := Bundle{
+		Version: "v1",
+		Hash:    "bundle-hash",
+		Rules: []Rule{
+			{
+				ID:         "allow-git",
+				ActionType: "process.exec",
+				Resource:   "file://workspace/",
+				Decision:   DecisionAllow,
+				ExecMatch:  &ExecMatch{ArgvPatterns: [][]string{{"git", "push", "**"}}},
+			},
+			{
+				ID:         "deny-main-ref-push",
+				ActionType: "process.exec",
+				Resource:   "file://workspace/",
+				Decision:   DecisionDeny,
+				IdentityMatch: map[string]any{
+					"ci.branch": map[string]any{"in": []any{"main", "master"}},
+				},
+				ExecMatch: &ExecMatch{ArgvPatterns: [][]string{{"git", "push", "**"}}},
+			},
+		},
+	}
+	mainRef := mustNormalizedActionWithIdentity(t, "process.exec", "file://workspace/", `{"argv":["git","push","origin","HEAD:refs/heads/feature"],"cwd":"","env_allowlist_keys":[]}`, identity.VerifiedIdentity{
+		Principal:   "github:org/repo:actor",
+		Agent:       "codex",
+		Environment: "ci",
+		CI:          identity.CIIdentity{Provider: "github", Branch: "main"},
+	})
+	if got := NewEngine(bundle).Evaluate(mainRef); got.Decision != DecisionDeny {
+		t.Fatalf("expected verified main branch push denial, got %+v", got)
+	}
+	featureRef := mustNormalizedActionWithIdentity(t, "process.exec", "file://workspace/", `{"argv":["git","push","origin","HEAD:refs/heads/feature"],"cwd":"","env_allowlist_keys":[]}`, identity.VerifiedIdentity{
+		Principal:   "github:org/repo:actor",
+		Agent:       "codex",
+		Environment: "ci",
+		CI:          identity.CIIdentity{Provider: "github", Branch: "feature/acdk-1"},
+	})
+	if got := NewEngine(bundle).Evaluate(featureRef); got.Decision != DecisionAllow {
+		t.Fatalf("expected feature branch push allow, got %+v", got)
+	}
+}
+
+func TestLoadBundleRejectsInvalidIdentityMatch(t *testing.T) {
+	_, err := LoadBundleBytes([]byte(`version: v1
+rules:
+  - id: bad-identity-match
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    identity_match:
+      ci.branch:
+        in: []
+`), "bad.yaml")
+	if err == nil || !strings.Contains(err.Error(), "identity_match.ci.branch.in") {
+		t.Fatalf("expected identity_match validation failure, got %v", err)
+	}
+}
+
+func TestCIStandardDeniesPushFromVerifiedProtectedBranch(t *testing.T) {
+	bundle, err := LoadBundle(filepath.Clean(filepath.Join("..", "..", "profiles", "ci-standard.yaml")))
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	act := mustNormalizedActionWithIdentity(t, "process.exec", "file://workspace/", `{"argv":["git","push","origin","HEAD:refs/heads/ai-dev-agent/ACDK-1"],"cwd":"","env_allowlist_keys":[]}`, identity.VerifiedIdentity{
+		Principal:   "gitlab:group/project:actor",
+		Agent:       "codex",
+		Environment: "ci",
+		CI:          identity.CIIdentity{Provider: "gitlab", Branch: "main"},
+	})
+	decision := NewEngine(bundle).Evaluate(act)
+	if decision.Decision != DecisionDeny || len(decision.MatchedRuleIDs) != 1 || decision.MatchedRuleIDs[0] != "ci-standard-deny-push-from-main-ref" {
+		t.Fatalf("expected verified protected branch deny, got %+v", decision)
+	}
+}
+
 func TestPolicyExecMatchDerivesExecConstraintsForAllowDecision(t *testing.T) {
 	bundle := Bundle{
 		Version: "v1",
@@ -772,6 +849,11 @@ func execActionForTest(params string) normalize.NormalizedAction {
 
 func mustNormalizedAction(t *testing.T, actionType, resource, params string) normalize.NormalizedAction {
 	t.Helper()
+	return mustNormalizedActionWithIdentity(t, actionType, resource, params, identity.VerifiedIdentity{Principal: "system", Agent: "prodclaw", Environment: "dev"})
+}
+
+func mustNormalizedActionWithIdentity(t *testing.T, actionType, resource, params string, id identity.VerifiedIdentity) normalize.NormalizedAction {
+	t.Helper()
 	act, err := action.ToAction(action.Request{
 		SchemaVersion: "v1",
 		ActionID:      "policy-http-test",
@@ -780,7 +862,7 @@ func mustNormalizedAction(t *testing.T, actionType, resource, params string) nor
 		Params:        []byte(params),
 		TraceID:       "policy-http-test",
 		Context:       action.Context{Extensions: map[string]json.RawMessage{}},
-	}, identity.VerifiedIdentity{Principal: "system", Agent: "prodclaw", Environment: "dev"})
+	}, id)
 	if err != nil {
 		t.Fatalf("to action: %v", err)
 	}

@@ -67,6 +67,47 @@
       "type": "string",
       "minLength": 1
     },
+    "ci_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string" },
+        "repo": { "type": "string" },
+        "project": { "type": "string" },
+        "ref": { "type": "string" },
+        "branch": { "type": "string" },
+        "commit_sha": { "type": "string" },
+        "run_id": { "type": "string" },
+        "pipeline_id": { "type": "string" },
+        "workflow_run_id": { "type": "string" },
+        "job_id": { "type": "string" },
+        "actor": { "type": "string" },
+        "event_type": { "type": "string" },
+        "workspace_root": { "type": "string" }
+      }
+    },
+    "credential_exposure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agent_env_keys": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "executor_only_keys": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "scrubbed_keys": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "credential_scopes": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
     "action_fingerprint": {
       "type": "string",
       "minLength": 64,

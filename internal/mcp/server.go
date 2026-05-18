@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -121,6 +120,12 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	if id.Environment == "" {
 		id.Environment = "ci"
+	}
+	if id.CI.WorkspaceRoot == "" {
+		id.CI.WorkspaceRoot = absWorkspace
+	}
+	if len(id.CredentialExposure.AgentEnvKeys) == 0 && len(id.CredentialExposure.ExecutorOnlyKeys) == 0 && len(id.CredentialExposure.ScrubbedKeys) == 0 && len(id.CredentialExposure.CredentialScopes) == 0 {
+		id.CredentialExposure = identity.CredentialExposure(os.LookupEnv, nil)
 	}
 	artifactDir := strings.TrimSpace(opts.ArtifactDir)
 	if artifactDir == "" {
@@ -372,12 +377,14 @@ func toolDefinitions() []map[string]any {
 			"output_max_lines":   map[string]any{"type": "integer"},
 		}, []string{"argv"}),
 		tool("http_request", "Send an HTTP request through ProdClaw net.http_request policy.", map[string]any{
-			"url":              map[string]any{"type": "string"},
-			"method":           map[string]any{"type": "string"},
-			"headers":          map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
-			"body":             map[string]any{"type": "string"},
-			"output_max_bytes": map[string]any{"type": "integer"},
-			"output_max_lines": map[string]any{"type": "integer"},
+			"url":                map[string]any{"type": "string"},
+			"method":             map[string]any{"type": "string"},
+			"headers":            map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+			"body":               map[string]any{"type": "string"},
+			"credential_env_key": map[string]any{"type": "string"},
+			"credential_header":  map[string]any{"type": "string"},
+			"output_max_bytes":   map[string]any{"type": "integer"},
+			"output_max_lines":   map[string]any{"type": "integer"},
 		}, []string{"url"}),
 		tool("call_tool", "Forward an upstream tool call through ProdClaw mcp.call policy.", map[string]any{
 			"server":    map[string]any{"type": "string"},
@@ -587,11 +594,14 @@ func (s *Server) httpRequest(ctx context.Context, args json.RawMessage) (any, er
 		return nil, err
 	}
 	auth, err := s.authorize("http_request", "net.http_request", resource, map[string]any{
-		"method":           input.Method,
-		"headers":          input.Headers,
-		"body":             input.Body,
-		"output_max_bytes": input.OutputMaxBytes,
-		"output_max_lines": input.OutputMaxLines,
+		"method":             input.Method,
+		"headers":            input.Headers,
+		"body":               input.Body,
+		"credential_env_key": input.CredentialEnvKey,
+		"credential_header":  input.CredentialHeader,
+		"credential_scope":   credentialScopeForEnvKey(input.CredentialEnvKey),
+		"output_max_bytes":   input.OutputMaxBytes,
+		"output_max_lines":   input.OutputMaxLines,
 	})
 	if err != nil {
 		return nil, err
@@ -602,6 +612,14 @@ func (s *Server) httpRequest(ctx context.Context, args json.RawMessage) (any, er
 	params, err := normalizedHTTPParams(auth.normalized.Params)
 	if err != nil {
 		return nil, err
+	}
+	if header, value, err := materializeHTTPCredential(input, os.LookupEnv); err != nil {
+		return s.failureResult(auth, err), nil
+	} else if header != "" {
+		if params.Headers == nil {
+			params.Headers = map[string]string{}
+		}
+		params.Headers[header] = value
 	}
 	execCtx, cancel := executor.WithTimeout(ctx, auth.decision.Obligations)
 	defer cancel()
@@ -765,29 +783,31 @@ func (s *Server) authorize(tool, actionType, resource string, params map[string]
 
 func (s *Server) recordAudit(auth authorizedAction, outcome executor.Outcome) {
 	_ = s.audit(audit.Event{
-		SchemaVersion:     audit.SchemaVersionV1,
-		Timestamp:         time.Now().UTC().Format(time.RFC3339Nano),
-		ActionID:          auth.normalized.ActionID,
-		TraceID:           auth.normalized.TraceID,
-		Tool:              auth.tool,
-		ActionType:        auth.actionType,
-		Resource:          auth.normalized.Resource,
-		ParamsHash:        auth.normalized.ParamsHash,
-		Principal:         auth.normalized.Principal,
-		Agent:             auth.normalized.Agent,
-		Environment:       auth.normalized.Environment,
-		ActionFingerprint: auth.fingerprint,
-		Decision:          auth.decision.Decision,
-		ReasonCode:        auth.decision.ReasonCode,
-		MatchedRuleIDs:    auth.decision.MatchedRuleIDs,
-		PolicyBundleHash:  auth.decision.PolicyBundleHash,
-		ResultCode:        outcome.ResultCode,
-		Retryable:         outcome.Retryable,
-		RedactionSummary:  outcome.RedactionSummary,
-		ExecCondition:     auth.explanation.ExecAuthorization.ConditionClass,
-		HTTPStatusCode:    outcome.HTTPStatusCode,
-		HTTPFinalResource: outcome.HTTPFinalResource,
-		HTTPRedirectHops:  outcome.HTTPRedirectHops,
+		SchemaVersion:      audit.SchemaVersionV1,
+		Timestamp:          time.Now().UTC().Format(time.RFC3339Nano),
+		ActionID:           auth.normalized.ActionID,
+		TraceID:            auth.normalized.TraceID,
+		Tool:               auth.tool,
+		ActionType:         auth.actionType,
+		Resource:           auth.normalized.Resource,
+		ParamsHash:         auth.normalized.ParamsHash,
+		Principal:          auth.normalized.Principal,
+		Agent:              auth.normalized.Agent,
+		Environment:        auth.normalized.Environment,
+		CIIdentity:         s.id.CI,
+		CredentialExposure: s.id.CredentialExposure,
+		ActionFingerprint:  auth.fingerprint,
+		Decision:           auth.decision.Decision,
+		ReasonCode:         auth.decision.ReasonCode,
+		MatchedRuleIDs:     auth.decision.MatchedRuleIDs,
+		PolicyBundleHash:   auth.decision.PolicyBundleHash,
+		ResultCode:         outcome.ResultCode,
+		Retryable:          outcome.Retryable,
+		RedactionSummary:   outcome.RedactionSummary,
+		ExecCondition:      auth.explanation.ExecAuthorization.ConditionClass,
+		HTTPStatusCode:     outcome.HTTPStatusCode,
+		HTTPFinalResource:  outcome.HTTPFinalResource,
+		HTTPRedirectHops:   outcome.HTTPRedirectHops,
 	})
 }
 
@@ -883,28 +903,7 @@ func runCommand(ctx context.Context, _ string, req commandRequest) commandResult
 }
 
 func commandEnvironment(allowlist []string) []string {
-	keys := map[string]struct{}{}
-	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG"} {
-		keys[key] = struct{}{}
-	}
-	for _, key := range allowlist {
-		key = strings.TrimSpace(key)
-		if key != "" {
-			keys[key] = struct{}{}
-		}
-	}
-	ordered := make([]string, 0, len(keys))
-	for key := range keys {
-		ordered = append(ordered, key)
-	}
-	sort.Strings(ordered)
-	env := make([]string, 0, len(ordered))
-	for _, key := range ordered {
-		if value, ok := os.LookupEnv(key); ok {
-			env = append(env, key+"="+value)
-		}
-	}
-	return env
+	return identity.AgentEnvironment(os.LookupEnv, allowlist)
 }
 
 func (s *Server) deniedResult(auth authorizedAction) map[string]any {

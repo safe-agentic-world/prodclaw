@@ -14,27 +14,35 @@ import (
 )
 
 func validateParamsMatch(rule Rule) error {
-	if len(rule.ParamsMatch) == 0 {
+	return validateMatchMap(rule.ID, "params_match", rule.ParamsMatch)
+}
+
+func validateIdentityMatch(rule Rule) error {
+	return validateMatchMap(rule.ID, "identity_match", rule.IdentityMatch)
+}
+
+func validateMatchMap(ruleID, field string, match map[string]any) error {
+	if len(match) == 0 {
 		return nil
 	}
-	for path, expected := range rule.ParamsMatch {
+	for path, expected := range match {
 		if strings.TrimSpace(path) == "" {
-			return fmt.Errorf("rule %s params_match path is required", rule.ID)
+			return fmt.Errorf("rule %s %s path is required", ruleID, field)
 		}
 		if condition, ok := expected.(map[string]any); ok && paramsMatchConditionKeys(condition) {
 			for key, value := range condition {
 				switch key {
 				case "present":
 					if _, ok := value.(bool); !ok {
-						return fmt.Errorf("rule %s params_match.%s.present must be boolean", rule.ID, path)
+						return fmt.Errorf("rule %s %s.%s.present must be boolean", ruleID, field, path)
 					}
 				case "equals":
 				case "in":
 					if values, ok := value.([]any); !ok || len(values) == 0 {
-						return fmt.Errorf("rule %s params_match.%s.in must be a non-empty array", rule.ID, path)
+						return fmt.Errorf("rule %s %s.%s.in must be a non-empty array", ruleID, field, path)
 					}
 				default:
-					return fmt.Errorf("rule %s params_match.%s has unsupported condition %q", rule.ID, path, key)
+					return fmt.Errorf("rule %s %s.%s has unsupported condition %q", ruleID, field, path, key)
 				}
 			}
 		}
@@ -63,6 +71,37 @@ func matchParams(rule Rule, action normalize.NormalizedAction) bool {
 	for _, path := range paths {
 		actual, present := lookupParamPath(params, path)
 		if !matchParamCondition(actual, present, rule.ParamsMatch[path]) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchIdentity(rule Rule, action normalize.NormalizedAction) bool {
+	if len(rule.IdentityMatch) == 0 {
+		return true
+	}
+	raw, ok := action.Context.Extensions["prodclaw.identity"]
+	if !ok {
+		return false
+	}
+	var identityValue any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&identityValue); err != nil {
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return false
+	}
+	paths := make([]string, 0, len(rule.IdentityMatch))
+	for path := range rule.IdentityMatch {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		actual, present := lookupParamPath(identityValue, path)
+		if !matchParamCondition(actual, present, rule.IdentityMatch[path]) {
 			return false
 		}
 	}

@@ -193,6 +193,63 @@ func TestJobRunLoadsConfigWithFlagPrecedence(t *testing.T) {
 	}
 }
 
+func TestJobRunControlledCIIncludesVerifiedIdentity(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("GITLAB_CI", "true")
+	t.Setenv("CI_PROJECT_PATH", "firstgroup365/devops/codex-ci-agent")
+	t.Setenv("CI_COMMIT_REF_NAME", "feature/acdk-1")
+	t.Setenv("CI_COMMIT_SHA", "abcdef0123456789")
+	t.Setenv("CI_PIPELINE_ID", "2002")
+	t.Setenv("CI_JOB_ID", "3003")
+	t.Setenv("GITLAB_USER_LOGIN", "ps-tech-geek")
+	t.Setenv("CI_PIPELINE_SOURCE", "push")
+	t.Setenv("GITLAB_TOKEN", "raw-token-never-returned")
+
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task", taskPath, "--dry-run", "--controlled-ci"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if !got.ControlledCI || got.Principal != "gitlab:firstgroup365/devops/codex-ci-agent:ps-tech-geek" || got.Environment != "ci" {
+		t.Fatalf("unexpected identity metadata: %+v", got)
+	}
+	if got.CIIdentity.Provider != "gitlab" || got.CIIdentity.Branch != "feature/acdk-1" || got.CIIdentity.PipelineID != "2002" {
+		t.Fatalf("unexpected CI identity: %+v", got.CIIdentity)
+	}
+	payload := stdout.String() + stderr.String()
+	if strings.Contains(payload, "raw-token-never-returned") {
+		t.Fatalf("secret leaked in job output: %s", payload)
+	}
+	if !got.CredentialExposure.CredentialScopes["gitlab_token"] {
+		t.Fatalf("expected credential scope summary, got %+v", got.CredentialExposure)
+	}
+}
+
+func TestJobRunControlledCIFailsWithoutSupportedIdentity(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("GITLAB_CI", "")
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task", taskPath, "--dry-run", "--controlled-ci"}, &stdout, &stderr)
+	if code != 40 {
+		t.Fatalf("job run exit code = %d, want 40; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "controlled CI identity is required") {
+		t.Fatalf("expected controlled CI identity error, got %q", stderr.String())
+	}
+}
+
 func writePolicyFixture(t *testing.T, decision string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()

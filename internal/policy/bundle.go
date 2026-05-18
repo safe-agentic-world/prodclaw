@@ -28,19 +28,20 @@ type Bundle struct {
 }
 
 type Rule struct {
-	ID           string         `json:"id" yaml:"id"`
-	ActionType   string         `json:"action_type" yaml:"action_type"`
-	Resource     string         `json:"resource" yaml:"resource"`
-	Decision     string         `json:"decision" yaml:"decision"`
-	Principals   []string       `json:"principals,omitempty" yaml:"principals,omitempty"`
-	Agents       []string       `json:"agents,omitempty" yaml:"agents,omitempty"`
-	Environments []string       `json:"environments,omitempty" yaml:"environments,omitempty"`
-	RiskFlags    []string       `json:"risk_flags,omitempty" yaml:"risk_flags,omitempty"`
-	ParamsMatch  map[string]any `json:"params_match,omitempty" yaml:"params_match,omitempty"`
-	ExecMatch    *ExecMatch     `json:"exec_match,omitempty" yaml:"exec_match,omitempty"`
-	Obligations  map[string]any `json:"obligations,omitempty" yaml:"obligations,omitempty"`
-	SourcePath   string         `json:"-" yaml:"-"`
-	SourceHash   string         `json:"-" yaml:"-"`
+	ID            string         `json:"id" yaml:"id"`
+	ActionType    string         `json:"action_type" yaml:"action_type"`
+	Resource      string         `json:"resource" yaml:"resource"`
+	Decision      string         `json:"decision" yaml:"decision"`
+	Principals    []string       `json:"principals,omitempty" yaml:"principals,omitempty"`
+	Agents        []string       `json:"agents,omitempty" yaml:"agents,omitempty"`
+	Environments  []string       `json:"environments,omitempty" yaml:"environments,omitempty"`
+	RiskFlags     []string       `json:"risk_flags,omitempty" yaml:"risk_flags,omitempty"`
+	ParamsMatch   map[string]any `json:"params_match,omitempty" yaml:"params_match,omitempty"`
+	IdentityMatch map[string]any `json:"identity_match,omitempty" yaml:"identity_match,omitempty"`
+	ExecMatch     *ExecMatch     `json:"exec_match,omitempty" yaml:"exec_match,omitempty"`
+	Obligations   map[string]any `json:"obligations,omitempty" yaml:"obligations,omitempty"`
+	SourcePath    string         `json:"-" yaml:"-"`
+	SourceHash    string         `json:"-" yaml:"-"`
 }
 
 type ExecMatch struct {
@@ -264,6 +265,9 @@ func (b Bundle) Validate() error {
 			return fmt.Errorf("rule %s has invalid decision", rule.ID)
 		}
 		if err := validateParamsMatch(rule); err != nil {
+			return err
+		}
+		if err := validateIdentityMatch(rule); err != nil {
 			return err
 		}
 		if rule.ExecMatch != nil {

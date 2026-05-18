@@ -12,11 +12,14 @@ import (
 )
 
 type HTTPParams struct {
-	Method         string            `json:"method"`
-	Body           string            `json:"body"`
-	Headers        map[string]string `json:"headers"`
-	OutputMaxBytes int               `json:"output_max_bytes,omitempty"`
-	OutputMaxLines int               `json:"output_max_lines,omitempty"`
+	Method           string            `json:"method"`
+	Body             string            `json:"body"`
+	Headers          map[string]string `json:"headers"`
+	CredentialEnvKey string            `json:"credential_env_key,omitempty"`
+	CredentialHeader string            `json:"credential_header,omitempty"`
+	CredentialScope  string            `json:"credential_scope,omitempty"`
+	OutputMaxBytes   int               `json:"output_max_bytes,omitempty"`
+	OutputMaxLines   int               `json:"output_max_lines,omitempty"`
 }
 
 func NormalizeHTTPParams(raw []byte) ([]byte, error) {
@@ -48,6 +51,9 @@ func NormalizeHTTPParams(raw []byte) ([]byte, error) {
 		canonicalHeaders[key] = value
 	}
 	params.Headers = canonicalHeaders
+	params.CredentialEnvKey = strings.TrimSpace(params.CredentialEnvKey)
+	params.CredentialHeader = http.CanonicalHeaderKey(strings.TrimSpace(params.CredentialHeader))
+	params.CredentialScope = strings.TrimSpace(params.CredentialScope)
 	encoded, err := json.Marshal(params)
 	if err != nil {
 		return nil, err

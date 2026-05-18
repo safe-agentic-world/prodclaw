@@ -13,6 +13,8 @@ func TestLoadUsesFileThenEnvironment(t *testing.T) {
 			return "ci-standard", true
 		case "PRODCLAW_AGENT":
 			return "codex", true
+		case "PRODCLAW_CONTROLLED_CI":
+			return "true", true
 		default:
 			return "", false
 		}
@@ -22,6 +24,9 @@ func TestLoadUsesFileThenEnvironment(t *testing.T) {
 	}
 	if values.Workspace != "repo" || values.TaskPath != "task.md" {
 		t.Fatalf("expected file values retained, got %+v", values)
+	}
+	if !values.ControlledCI {
+		t.Fatalf("expected controlled CI override, got %+v", values)
 	}
 }
 

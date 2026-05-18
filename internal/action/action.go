@@ -191,6 +191,16 @@ func ToAction(req Request, id identity.VerifiedIdentity) (Action, error) {
 	if id.Principal == "" || id.Agent == "" || id.Environment == "" {
 		return Action{}, errors.New("verified identity is required")
 	}
+	extensions := make(map[string]json.RawMessage, len(req.Context.Extensions)+1)
+	for key, value := range req.Context.Extensions {
+		extensions[key] = value
+	}
+	identityContext, err := identity.PolicyContextJSON(id)
+	if err != nil {
+		return Action{}, err
+	}
+	// Verified identity is injected by ProdClaw and overrides any agent-supplied claim.
+	extensions["prodclaw.identity"] = identityContext
 	act := Action{
 		SchemaVersion: req.SchemaVersion,
 		ActionID:      strings.TrimSpace(req.ActionID),
@@ -200,7 +210,7 @@ func ToAction(req Request, id identity.VerifiedIdentity) (Action, error) {
 		Principal:     id.Principal,
 		Agent:         id.Agent,
 		Environment:   id.Environment,
-		Context:       req.Context,
+		Context:       Context{Extensions: extensions},
 		TraceID:       strings.TrimSpace(req.TraceID),
 	}
 	if err := ValidateActionType(act.ActionType); err != nil {

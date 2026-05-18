@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/normalize"
 )
 
@@ -144,13 +145,7 @@ func hasShellMetacharacters(argv []string) bool {
 
 func hasSensitiveEnvKey(keys []string) bool {
 	for _, key := range keys {
-		lower := strings.ToLower(strings.TrimSpace(key))
-		if strings.Contains(lower, "token") ||
-			strings.Contains(lower, "secret") ||
-			strings.Contains(lower, "password") ||
-			strings.Contains(lower, "credential") ||
-			strings.Contains(lower, "auth") ||
-			strings.HasSuffix(lower, "_key") {
+		if identity.SensitiveEnvKey(key) {
 			return true
 		}
 	}

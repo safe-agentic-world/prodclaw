@@ -390,6 +390,64 @@ func TestHTTPToolDeniedSensitiveHeadersDoNotLeakToAudit(t *testing.T) {
 	}
 }
 
+func TestHTTPToolMaterializesCredentialOnlyInsideExecutor(t *testing.T) {
+	t.Setenv("GITLAB_TOKEN", "glpat-raw-secret")
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Private-Token"); got != "glpat-raw-secret" {
+			t.Fatalf("executor did not materialize credential header, got %q", got)
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+
+	host := target.Listener.Addr().String()
+	bundle := mustBundle(t, fmt.Sprintf(`version: v1
+rules:
+  - id: allow-gitlab-token-http
+    action_type: net.http_request
+    resource: url://%s/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["POST"]
+      credential_scope:
+        equals: gitlab_token
+    identity_match:
+      credential_exposure.credential_scopes.gitlab_token:
+        equals: true
+    obligations:
+      net_allowlist:
+        - %s
+`, host, host))
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir(), AuditPath: auditPath})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	result, err := server.httpRequest(context.Background(), json.RawMessage(fmt.Sprintf(`{"url":%q,"method":"POST","headers":{},"body":"","credential_env_key":"GITLAB_TOKEN","credential_header":"PRIVATE-TOKEN"}`, target.URL)))
+	if err != nil {
+		t.Fatalf("http request: %v", err)
+	}
+	payload := mustMarshal(t, result)
+	if !strings.Contains(payload, `"result_code":"success"`) || strings.Contains(payload, "glpat-raw-secret") {
+		t.Fatalf("unexpected credential materialization result: %s", payload)
+	}
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if strings.Contains(string(data), "glpat-raw-secret") {
+		t.Fatalf("raw credential leaked to audit: %s", string(data))
+	}
+	var event audit.Event
+	if err := json.Unmarshal(bytes.TrimSpace(data), &event); err != nil {
+		t.Fatalf("decode audit: %v", err)
+	}
+	if !event.CredentialExposure.CredentialScopes["gitlab_token"] {
+		t.Fatalf("expected credential exposure summary in audit, got %+v", event.CredentialExposure)
+	}
+}
+
 func TestHTTPToolRejectsOversizedRequestBeforeTransport(t *testing.T) {
 	bundle := mustBundle(t, `version: v1
 rules:
@@ -427,7 +485,7 @@ func TestCommandEnvironmentUsesSafeBaselinePlusExplicitAllowlist(t *testing.T) {
 	t.Setenv("HOME", "safe-home")
 	t.Setenv("CUSTOM_ALLOWED", "custom-value")
 	t.Setenv("GITLAB_TOKEN", "must-not-leak")
-	env := commandEnvironment([]string{"CUSTOM_ALLOWED"})
+	env := commandEnvironment([]string{"CUSTOM_ALLOWED", "GITLAB_TOKEN"})
 	joined := strings.Join(env, "\n")
 	if !strings.Contains(joined, "PATH=safe-path") || !strings.Contains(joined, "HOME=safe-home") || !strings.Contains(joined, "CUSTOM_ALLOWED=custom-value") {
 		t.Fatalf("expected safe baseline and allowlist, got %q", joined)

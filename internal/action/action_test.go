@@ -1,6 +1,7 @@
 package action
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -61,6 +62,36 @@ func TestDecodeActionRequestEnforcesParamsSize(t *testing.T) {
 	_, err := DecodeActionRequest(strings.NewReader(payload))
 	if err == nil {
 		t.Fatal("expected params size error")
+	}
+}
+
+func TestToActionOverridesAgentSuppliedIdentityContext(t *testing.T) {
+	req := Request{
+		SchemaVersion: "v1",
+		ActionID:      "act1",
+		ActionType:    "process.exec",
+		Resource:      "file://workspace/",
+		Params:        []byte(`{"argv":["git","status"],"cwd":"","env_allowlist_keys":[]}`),
+		TraceID:       "trace1",
+		Context: Context{Extensions: map[string]json.RawMessage{
+			"prodclaw.identity": []byte(`{"principal":"attacker","agent":"attacker","environment":"local","ci":{"branch":"main"}}`),
+		}},
+	}
+	act, err := ToAction(req, identity.VerifiedIdentity{
+		Principal:   "github:org/repo:actor",
+		Agent:       "codex",
+		Environment: "ci",
+		CI:          identity.CIIdentity{Provider: "github", Branch: "feature/acdk-1"},
+	})
+	if err != nil {
+		t.Fatalf("to action: %v", err)
+	}
+	var injected identity.VerifiedIdentity
+	if err := json.Unmarshal(act.Context.Extensions["prodclaw.identity"], &injected); err != nil {
+		t.Fatalf("decode injected identity: %v", err)
+	}
+	if injected.Principal != "github:org/repo:actor" || injected.Agent != "codex" || injected.Environment != "ci" || injected.CI.Branch != "feature/acdk-1" {
+		t.Fatalf("agent-supplied identity was not overridden: %+v", injected)
 	}
 }
 

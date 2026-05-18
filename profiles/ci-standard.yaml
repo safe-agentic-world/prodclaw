@@ -45,6 +45,18 @@ rules:
         - ["git", "push", "**", "+HEAD:refs/heads/main"]
         - ["git", "push", "**", "+HEAD:refs/heads/master"]
 
+  - id: ci-standard-deny-push-from-main-ref
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    identity_match:
+      ci.branch:
+        in: ["main", "master"]
+    exec_match:
+      argv_patterns:
+        - ["git", "push"]
+        - ["git", "push", "**"]
+
   - id: ci-standard-deny-history-rewrite
     action_type: process.exec
     resource: file://workspace/

@@ -179,6 +179,9 @@ func (e *Engine) Explain(action normalize.NormalizedAction) ExplainDetails {
 		if !matchParams(rule, action) {
 			continue
 		}
+		if !matchIdentity(rule, action) {
+			continue
+		}
 		if !matchExec(rule, action) {
 			continue
 		}
@@ -217,14 +220,15 @@ func (e *Engine) Explain(action normalize.NormalizedAction) ExplainDetails {
 				ReasonCode:   "deny_by_rule",
 				BundleSource: ruleBundleSource(rule),
 				MatchedConditions: map[string]bool{
-					"action_type":  true,
-					"resource":     true,
-					"principal":    true,
-					"agent":        true,
-					"environment":  true,
-					"risk_flags":   true,
-					"params_match": true,
-					"exec_match":   true,
+					"action_type":    true,
+					"resource":       true,
+					"principal":      true,
+					"agent":          true,
+					"environment":    true,
+					"risk_flags":     true,
+					"params_match":   true,
+					"identity_match": true,
+					"exec_match":     true,
 				},
 			})
 		}
