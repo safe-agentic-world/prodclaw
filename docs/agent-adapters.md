@@ -1,6 +1,6 @@
 # Agent Adapters
 
-ProdClaw keeps Codex and Claude Code behind one launch-plan contract. The job metadata stays uniform; only the adapter-specific argv and MCP wiring details differ.
+ProdClaw keeps Codex and Claude Code behind one launch-plan contract. The job metadata stays uniform; only the adapter-specific argv, MCP wiring details, and final-output capture mechanism differ.
 
 ## Dry Run
 
@@ -24,7 +24,7 @@ Dry-run does not need OpenAI or Anthropic credentials and does not mutate global
 ## Wiring Contract
 
 - Codex uses per-invocation `-c mcp_servers.prodclaw.*` overrides and does not require edits to `~/.codex/config.toml`.
-- Claude Code uses a per-invocation `--mcp-config <path>` flag.
+- Claude Code uses per-invocation `--strict-mcp-config --mcp-config <path>` flags.
 
 Both adapters build the same isolated MCP config shape first. ProdClaw rejects generated configs that contain any additional raw MCP server beside `prodclaw`; upstream tools must be reached through governed ProdClaw policy, not by silent side-by-side registration.
 
@@ -33,3 +33,5 @@ Both adapters build the same isolated MCP config shape first. ProdClaw rejects g
 The adapter can verify that the generated launch argv attaches the ProdClaw MCP config. That is not the same as proving exclusive mediation once the agent starts. Native tools may still exist in the underlying agent, so launch plans include a bypass warning instead of claiming stronger enforcement than the adapter can mechanically prove.
 
 `job run --no-launch` records an agent version when the binary is available. Dry-run intentionally omits environment-derived version discovery so identical inputs produce deterministic plan output.
+
+Real jobs still share the same post-run evaluator. Adapter-specific output capture cannot relax policy-denial, expected-action, mutation-evidence, or budget gates.

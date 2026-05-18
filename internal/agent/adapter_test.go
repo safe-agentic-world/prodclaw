@@ -15,10 +15,11 @@ func TestCodexLaunchPlanUsesConfigOverrides(t *testing.T) {
 		t.Fatalf("build mcp config: %v", err)
 	}
 	plan, err := builder.Build(BuildInput{
-		Workspace:     "/workspace",
-		TaskPrompt:    "fix it",
-		MCPConfigPath: "/workspace/.prodclaw/agent/codex.mcp.json",
-		MCPConfig:     config,
+		Workspace:        "/workspace",
+		TaskPrompt:       "fix it",
+		MCPConfigPath:    "/workspace/.prodclaw/agent/codex.mcp.json",
+		MCPConfig:        config,
+		FinalMessagePath: "/workspace/artifacts/agent-final-message.txt",
 	})
 	if err != nil {
 		t.Fatalf("build codex plan: %v", err)
@@ -31,7 +32,7 @@ func TestCodexLaunchPlanUsesConfigOverrides(t *testing.T) {
 		`mcp_servers.prodclaw.command="prodclaw"`,
 		`mcp_servers.prodclaw.args=["mcp","--profile","ci-strict"]`,
 		`mcp_servers.prodclaw.default_tools_approval_mode="approve"`,
-		"exec\x00fix it",
+		"exec\x00-o\x00/workspace/artifacts/agent-final-message.txt\x00fix it",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("codex argv missing %q: %+v", want, plan.Argv)
@@ -63,7 +64,7 @@ func TestClaudeLaunchPlanUsesMCPConfigFlag(t *testing.T) {
 	if plan.MCPWiringMethod != MCPWiringConfigFlag || !plan.MCPAttachmentVerified {
 		t.Fatalf("unexpected claude wiring metadata: %+v", plan)
 	}
-	if got := strings.Join(plan.Argv, "\x00"); got != "--mcp-config\x00/workspace/.prodclaw/agent/claude.mcp.json\x00-p\x00fix it" {
+	if got := strings.Join(plan.Argv, "\x00"); got != "--strict-mcp-config\x00--mcp-config\x00/workspace/.prodclaw/agent/claude.mcp.json\x00--tools\x00\x00--permission-mode\x00dontAsk\x00--print\x00fix it" {
 		t.Fatalf("unexpected claude argv: %+v", plan.Argv)
 	}
 }

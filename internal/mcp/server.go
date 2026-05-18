@@ -40,6 +40,18 @@ type Server struct {
 	commandExec func(context.Context, string, commandRequest) commandResult
 }
 
+func (s *Server) AdvertisedToolNames() []string {
+	definitions := s.toolDefinitions()
+	names := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		if name, ok := definition["name"].(string); ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 type Options struct {
 	Bundle      policy.Bundle
 	Workspace   string
@@ -1072,7 +1084,7 @@ func (s *Server) writeArtifact(ctx context.Context, args json.RawMessage) (any, 
 	if err := execCtx.Err(); err != nil {
 		return s.failureResult(auth, err), nil
 	}
-	return s.textResult(auth, "ALLOW artifact.write wrote "+rel, executor.ResultSuccess, false, false, 0, 0), nil
+	return s.textResultWithOutcome(auth, "ALLOW artifact.write wrote "+rel, executor.Outcome{ResultCode: executor.ResultSuccess, ArtifactBytes: len(input.Content)}, false, 0, 0), nil
 }
 
 func decodeArgs(args json.RawMessage, dst any) error {
@@ -1147,6 +1159,8 @@ func (s *Server) recordAudit(auth authorizedAction, outcome executor.Outcome) {
 		ResultCode:         outcome.ResultCode,
 		Retryable:          outcome.Retryable,
 		RedactionSummary:   outcome.RedactionSummary,
+		ReturnedBytes:      outcome.ReturnedBytes,
+		ArtifactBytes:      outcome.ArtifactBytes,
 		ExecCondition:      auth.explanation.ExecAuthorization.ConditionClass,
 		HTTPStatusCode:     outcome.HTTPStatusCode,
 		HTTPFinalResource:  outcome.HTTPFinalResource,
@@ -1282,6 +1296,7 @@ func (s *Server) textResult(auth authorizedAction, text, resultCode string, retr
 func (s *Server) textResultWithOutcome(auth authorizedAction, text string, outcome executor.Outcome, isError bool, requestedMaxBytes, requestedMaxLines int) map[string]any {
 	sanitized, summary := executor.SanitizeOutput(s.redactor, text, auth.decision.Obligations, requestedMaxBytes, requestedMaxLines)
 	outcome.RedactionSummary = summary
+	outcome.ReturnedBytes = len([]byte(sanitized))
 	s.recordAudit(auth, outcome)
 	result := map[string]any{
 		"result_code": outcome.ResultCode,

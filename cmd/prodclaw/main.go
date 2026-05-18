@@ -60,7 +60,7 @@ func printHelp() {
 	fmt.Fprintln(os.Stderr, "  policy     check or explain policy decisions")
 	fmt.Fprintln(os.Stderr, "  profiles   inspect built-in profiles")
 	fmt.Fprintln(os.Stderr, "  mcp        start governed MCP stdio server")
-	fmt.Fprintln(os.Stderr, "  job        inspect a governed CI job launch plan")
+	fmt.Fprintln(os.Stderr, "  job        run a governed CI job")
 }
 
 func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -70,6 +70,7 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var bundlePath string
 	var profileName string
 	var workspace string
+	var artifactDir string
 	var auditPath string
 	var principal string
 	var agent string
@@ -81,6 +82,7 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.StringVar(&profileName, "profile", "", "built-in profile name")
 	bindPolicyInputFlags(fs, &policyInputFlags)
 	fs.StringVar(&workspace, "workspace", ".", "workspace root")
+	fs.StringVar(&artifactDir, "artifact-dir", "", "artifact directory root")
 	fs.StringVar(&auditPath, "audit", "", "audit jsonl path")
 	fs.StringVar(&principal, "principal", "system", "verified principal")
 	fs.StringVar(&agent, "agent", "prodclaw", "verified agent")
@@ -97,6 +99,7 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	bundlePath = cfg.PolicyBundle
 	profileName = cfg.Profile
 	workspace = defaultString(cfg.Workspace, ".")
+	artifactDir = defaultString(artifactDir, "")
 	auditPath = cfg.AuditPath
 	principal = defaultString(cfg.Principal, "system")
 	agent = defaultString(cfg.Agent, "prodclaw")
@@ -110,9 +113,10 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 30
 	}
 	server, err := mcp.NewServer(mcp.Options{
-		Bundle:    selection.Bundle,
-		Workspace: workspace,
-		AuditPath: auditPath,
+		Bundle:      selection.Bundle,
+		Workspace:   workspace,
+		ArtifactDir: artifactDir,
+		AuditPath:   auditPath,
 		Identity: identity.VerifiedIdentity{
 			Principal:   principal,
 			Agent:       agent,

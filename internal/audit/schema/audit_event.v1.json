@@ -148,6 +148,14 @@
         }
       }
     },
+    "returned_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "artifact_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
     "exec_condition": {
       "type": "string",
       "minLength": 1

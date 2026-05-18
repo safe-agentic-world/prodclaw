@@ -55,10 +55,11 @@ type LaunchPlan struct {
 }
 
 type BuildInput struct {
-	Workspace     string
-	TaskPrompt    string
-	MCPConfigPath string
-	MCPConfig     MCPClientConfig
+	Workspace        string
+	TaskPrompt       string
+	MCPConfigPath    string
+	MCPConfig        MCPClientConfig
+	FinalMessagePath string
 }
 
 type Builder interface {
@@ -126,13 +127,12 @@ func (codexBuilder) Capabilities() Capabilities {
 	return Capabilities{
 		MCPWiringMethod:              MCPWiringCodexConfigOverride,
 		MCPAttachmentVerification:    AttachmentVerificationLaunchArgv,
-		FinalOutputCapture:           "unsupported",
+		FinalOutputCapture:           "exec_output_file",
 		VersionDiscovery:             "version_flag",
 		RequiresGlobalConfigMutation: false,
 		NativeBypassPossible:         true,
 		UnsupportedFeatures: []string{
 			"native_tool_exclusion",
-			"final_output_capture",
 		},
 	}
 }
@@ -149,8 +149,12 @@ func (b codexBuilder) Build(input BuildInput) (LaunchPlan, error) {
 		"-C", input.Workspace,
 		"--ask-for-approval", "never",
 		"--sandbox", "read-only",
-		"exec", input.TaskPrompt,
+		"exec",
 	}
+	if strings.TrimSpace(input.FinalMessagePath) != "" {
+		base.Argv = append(base.Argv, "-o", input.FinalMessagePath)
+	}
+	base.Argv = append(base.Argv, input.TaskPrompt)
 	base.MCPAttachmentVerified = verifyCodexPlan(base.Argv, server)
 	return base, nil
 }
@@ -179,12 +183,15 @@ func (b claudeBuilder) Build(input BuildInput) (LaunchPlan, error) {
 		return LaunchPlan{}, err
 	}
 	base.Argv = []string{
+		"--strict-mcp-config",
 		"--mcp-config", input.MCPConfigPath,
-		"-p", input.TaskPrompt,
+		"--tools", "",
+		"--permission-mode", "dontAsk",
+		"--print", input.TaskPrompt,
 	}
-	base.MCPAttachmentVerified = len(base.Argv) >= 2 &&
-		base.Argv[0] == "--mcp-config" &&
-		base.Argv[1] == input.MCPConfigPath
+	base.MCPAttachmentVerified = len(base.Argv) >= 3 &&
+		base.Argv[1] == "--mcp-config" &&
+		base.Argv[2] == input.MCPConfigPath
 	return base, nil
 }
 

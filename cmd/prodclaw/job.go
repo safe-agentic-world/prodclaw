@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -8,11 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	agentkit "github.com/safe-agentic-world/prodclaw/internal/agent"
 	runtimeconfig "github.com/safe-agentic-world/prodclaw/internal/config"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
+	jobkit "github.com/safe-agentic-world/prodclaw/internal/job"
 	"github.com/safe-agentic-world/prodclaw/internal/logging"
+	"github.com/safe-agentic-world/prodclaw/internal/mcp"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
 )
 
@@ -21,6 +25,7 @@ type jobRunOutput struct {
 	Agent               string                             `json:"agent"`
 	Task                string                             `json:"task"`
 	Workspace           string                             `json:"workspace"`
+	ArtifactDir         string                             `json:"artifact_dir"`
 	Profile             string                             `json:"profile,omitempty"`
 	PolicyBundle        string                             `json:"policy_bundle,omitempty"`
 	PolicyBundleHash    string                             `json:"policy_bundle_hash"`
@@ -32,15 +37,42 @@ type jobRunOutput struct {
 	AgentVersion        string                             `json:"agent_version,omitempty"`
 	AgentCapabilities   agentkit.Capabilities              `json:"agent_capabilities"`
 	LaunchPlan          agentkit.LaunchPlan                `json:"launch_plan"`
+	ExpectedActions     []string                           `json:"expected_actions,omitempty"`
+	BudgetLimits        jobkit.BudgetLimits                `json:"budget_limits"`
+	PreflightTools      []string                           `json:"preflight_tools,omitempty"`
 	ControlledCI        bool                               `json:"controlled_ci"`
 	Principal           string                             `json:"principal"`
 	Environment         string                             `json:"environment"`
 	CIIdentity          identity.CIIdentity                `json:"ci_identity,omitempty"`
 	CredentialExposure  identity.CredentialExposureSummary `json:"credential_exposure,omitempty"`
+	Artifacts           jobArtifactPaths                   `json:"artifacts"`
+}
+
+type jobArtifactPaths struct {
+	Plan           string `json:"job_plan"`
+	Launch         string `json:"agent_launch"`
+	MCPConfig      string `json:"mcp_config"`
+	Audit          string `json:"audit"`
+	ChangedFiles   string `json:"changed_files"`
+	Result         string `json:"job_result"`
+	AgentMessage   string `json:"agent_message,omitempty"`
+	AgentArtifacts string `json:"agent_artifacts"`
+}
+
+type repeatedStrings []string
+
+func (values *repeatedStrings) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *repeatedStrings) Set(value string) error {
+	*values = append(*values, value)
+	return nil
 }
 
 var discoverJobAgentVersion = agentkit.DiscoverVersion
 var launchJobAgent = launchPlannedAgent
+var jobNow = time.Now
 
 func runJob(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
@@ -60,12 +92,24 @@ func runJob(args []string, stdout, stderr io.Writer) int {
 
 func printJobHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  prodclaw job run --agent codex|claude --task <path> [--config <path>] [--profile <name> | --policy-bundle <path> | layered policy flags] --dry-run")
+	fmt.Fprintln(w, "  prodclaw job run --agent codex|claude --task <path> [--config <path>] [--profile <name> | --policy-bundle <path> | layered policy flags] [flags]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "flags:")
+	fmt.Fprintln(w, "  --artifact-dir <path>       artifact directory (default .prodclaw/job)")
+	fmt.Fprintln(w, "  --expect-action <type>      expected governed action type; repeatable")
+	fmt.Fprintln(w, "  --max-wall-clock-ms <n>     wall-clock budget")
+	fmt.Fprintln(w, "  --max-tool-calls <n>        MCP tool-call budget")
+	fmt.Fprintln(w, "  --max-exec-calls <n>        process.exec budget")
+	fmt.Fprintln(w, "  --max-network-calls <n>     net.http_request budget")
+	fmt.Fprintln(w, "  --max-returned-bytes <n>    aggregate returned-byte budget")
+	fmt.Fprintln(w, "  --max-artifact-bytes <n>    aggregate artifact-byte budget")
+	fmt.Fprintln(w, "  --probe-tools               record advertised ProdClaw tools before launch")
+	fmt.Fprintln(w, "  --dry-run                   write deterministic preflight artifacts without launching")
+	fmt.Fprintln(w, "  --no-launch                 materialize artifacts/config and stop before launch")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "notes:")
 	fmt.Fprintln(w, "  - defaults to the embedded ci-strict profile when no policy is provided")
-	fmt.Fprintln(w, "  - dry-run emits the exact per-invocation agent argv and isolated ProdClaw MCP config")
-	fmt.Fprintln(w, "  - real launch starts the selected agent; deterministic post-run gates arrive in the job-runner milestone")
+	fmt.Fprintln(w, "  - launch plans attach only ProdClaw MCP; changed files without governed write/patch evidence fail closed")
 }
 
 func runJobRun(args []string, stdout, stderr io.Writer) int {
@@ -75,21 +119,34 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	var agent string
 	var taskPath string
 	var workspace string
+	var artifactDir string
 	var bundlePath string
 	var profileName string
 	var dryRun bool
 	var noLaunch bool
 	var controlledCI bool
+	var probeTools bool
+	var expectedActions repeatedStrings
 	var policyInputFlags policyInputFlagValues
+	var budgetLimits jobkit.BudgetLimits
 	fs.StringVar(&configPath, "config", "", "json config path")
 	fs.StringVar(&agent, "agent", "", "agent adapter: codex|claude")
 	fs.StringVar(&taskPath, "task", "", "task file path")
 	fs.StringVar(&workspace, "workspace", ".", "workspace root")
+	fs.StringVar(&artifactDir, "artifact-dir", "", "artifact directory")
 	fs.StringVar(&bundlePath, "bundle", "", "policy bundle path")
 	fs.StringVar(&bundlePath, "policy-bundle", "", "policy bundle path")
 	fs.StringVar(&profileName, "profile", "", "built-in profile name")
+	fs.Var(&expectedActions, "expect-action", "expected governed action type; repeatable")
 	bindPolicyInputFlags(fs, &policyInputFlags)
-	fs.BoolVar(&dryRun, "dry-run", false, "print launch plan without starting the agent")
+	fs.Int64Var(&budgetLimits.WallClockMS, "max-wall-clock-ms", 0, "maximum wall-clock milliseconds")
+	fs.IntVar(&budgetLimits.ToolCalls, "max-tool-calls", 0, "maximum MCP tool calls")
+	fs.IntVar(&budgetLimits.ExecCalls, "max-exec-calls", 0, "maximum process.exec calls")
+	fs.IntVar(&budgetLimits.NetworkCalls, "max-network-calls", 0, "maximum net.http_request calls")
+	fs.Int64Var(&budgetLimits.ReturnedBytes, "max-returned-bytes", 0, "maximum returned bytes")
+	fs.Int64Var(&budgetLimits.ArtifactBytes, "max-artifact-bytes", 0, "maximum artifact bytes")
+	fs.BoolVar(&probeTools, "probe-tools", false, "record advertised tools before launch")
+	fs.BoolVar(&dryRun, "dry-run", false, "write artifacts without starting the agent")
 	fs.BoolVar(&noLaunch, "no-launch", false, "prepare launch plan without starting the agent")
 	fs.BoolVar(&controlledCI, "controlled-ci", false, "fail closed unless supported CI identity is complete")
 	fs.Usage = func() { printJobHelp(stderr) }
@@ -100,10 +157,14 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "job run: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
 	}
+	if invalidBudgetLimits(budgetLimits) {
+		fmt.Fprintln(stderr, "job run: budget limits must be >= 0")
+		return jobkit.ExitInvalidConfig
+	}
 	cfg, err := runtimeconfig.Load(configPath, os.LookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: load config: %v\n", err)
-		return 30
+		return jobkit.ExitInvalidConfig
 	}
 	overlayJobFlags(fs, &cfg, agent, taskPath, workspace, bundlePath, profileName, controlledCI, policyInputFlags)
 	agent = cfg.Agent
@@ -112,28 +173,20 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	bundlePath = cfg.PolicyBundle
 	profileName = cfg.Profile
 	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "codex", "claude":
+	case agentkit.AgentCodex, agentkit.AgentClaude:
 	default:
 		fmt.Fprintln(stderr, "job run: --agent must be codex or claude")
-		return 30
+		return jobkit.ExitInvalidConfig
 	}
-	if strings.TrimSpace(taskPath) == "" {
-		fmt.Fprintln(stderr, "job run: --task is required")
-		return 30
-	}
-	taskInfo, err := os.Stat(taskPath)
+	workspaceAbs, err := resolveJobWorkspace(workspace)
 	if err != nil {
-		fmt.Fprintf(stderr, "job run: stat task: %v\n", err)
-		return 30
+		fmt.Fprintf(stderr, "job run: %v\n", err)
+		return jobkit.ExitInvalidConfig
 	}
-	if taskInfo.IsDir() {
-		fmt.Fprintln(stderr, "job run: --task must be a file")
-		return 30
-	}
-	taskBytes, err := os.ReadFile(taskPath)
+	taskAbs, taskText, err := jobkit.ReadTaskFile(workspaceAbs, taskPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "job run: read task: %v\n", err)
-		return 30
+		fmt.Fprintf(stderr, "job run: %v\n", err)
+		return jobkit.ExitInvalidConfig
 	}
 	if bundlePath == "" && profileName == "" && !cfg.PolicyInputs.HasAny() {
 		profileName = "ci-strict"
@@ -141,17 +194,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	selection, err := loadSelectedPolicy(policyLoadRequest{BundlePath: bundlePath, ProfileName: profileName, PolicyInputs: cfg.PolicyInputs})
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: load bundle: %v\n", err)
-		return 30
-	}
-	workspaceAbs, err := filepath.Abs(workspace)
-	if err != nil {
-		fmt.Fprintf(stderr, "job run: resolve workspace: %v\n", err)
-		return 30
-	}
-	taskAbs, err := filepath.Abs(taskPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "job run: resolve task: %v\n", err)
-		return 30
+		return jobkit.ExitInvalidConfig
 	}
 	verifiedIdentity, err := identity.DetectRuntimeIdentity(os.LookupEnv, identity.RuntimeOptions{
 		Agent:         agent,
@@ -162,39 +205,66 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: runtime identity: %v\n", err)
-		return 40
+		return jobkit.ExitRuntimeGuaranteeFailure
+	}
+	artifactDirAbs, err := resolveJobArtifactDir(workspaceAbs, artifactDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "job run: resolve artifact dir: %v\n", err)
+		return jobkit.ExitInvalidConfig
+	}
+	if err := os.MkdirAll(artifactDirAbs, 0o700); err != nil {
+		fmt.Fprintf(stderr, "job run: create artifact dir: %v\n", err)
+		return jobkit.ExitInternalError
+	}
+	artifacts := newJobArtifactPaths(artifactDirAbs)
+	if strings.TrimSpace(cfg.AuditPath) == "" {
+		cfg.AuditPath = artifacts.Audit
 	}
 	adapter, err := agentkit.Lookup(agent)
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: adapter: %v\n", err)
-		return 30
+		return jobkit.ExitInvalidConfig
 	}
-	mcpConfigPath := filepath.Join(workspaceAbs, ".prodclaw", "agent", adapter.Name()+".mcp.json")
-	mcpArgs := buildJobMCPArgs(selection, cfg, workspaceAbs, verifiedIdentity)
+	capabilities := adapter.Capabilities()
+	if capabilities.FinalOutputCapture != "" && capabilities.FinalOutputCapture != "unsupported" {
+		artifacts.AgentMessage = filepath.Join(artifactDirAbs, "agent-final-message.txt")
+	}
+	prompt := buildGovernedJobPrompt(workspaceAbs, taskAbs, taskText)
+	mcpArgs := buildJobMCPArgs(selection, cfg, workspaceAbs, artifacts.AgentArtifacts, verifiedIdentity)
 	mcpConfig, err := agentkit.BuildMCPConfig("prodclaw", mcpArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: build mcp config: %v\n", err)
-		return 30
+		return jobkit.ExitInvalidConfig
 	}
 	launchPlan, err := adapter.Build(agentkit.BuildInput{
-		Workspace:     workspaceAbs,
-		TaskPrompt:    string(taskBytes),
-		MCPConfigPath: mcpConfigPath,
-		MCPConfig:     mcpConfig,
+		Workspace:        workspaceAbs,
+		TaskPrompt:       prompt,
+		MCPConfigPath:    filepath.Join(artifactDirAbs, adapter.Name()+".mcp.json"),
+		MCPConfig:        mcpConfig,
+		FinalMessagePath: artifacts.AgentMessage,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: build launch plan: %v\n", err)
-		return 30
+		return jobkit.ExitInvalidConfig
 	}
 	if !launchPlan.MCPAttachmentVerified {
 		fmt.Fprintln(stderr, "job run: generated launch plan could not verify ProdClaw MCP attachment")
-		return 40
+		return jobkit.ExitRuntimeGuaranteeFailure
+	}
+	var preflightTools []string
+	if probeTools {
+		preflightTools, err = probeJobTools(selection.Bundle, workspaceAbs, artifacts.AgentArtifacts, cfg.AuditPath, verifiedIdentity)
+		if err != nil {
+			fmt.Fprintf(stderr, "job run: probe tools: %v\n", err)
+			return jobkit.ExitRuntimeGuaranteeFailure
+		}
 	}
 	output := jobRunOutput{
 		Mode:                selectJobRunMode(dryRun, noLaunch),
 		Agent:               verifiedIdentity.Agent,
 		Task:                taskAbs,
 		Workspace:           workspaceAbs,
+		ArtifactDir:         artifactDirAbs,
 		Profile:             selection.ProfileName,
 		PolicyBundle:        selection.BundlePath,
 		PolicyBundleHash:    selection.Bundle.Hash,
@@ -203,47 +273,102 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		PolicyBundleInputs:  append([]policy.BundleSource{}, selection.Bundle.SourceBundles...),
 		LaunchPlanned:       true,
 		MCPWiringMethod:     launchPlan.MCPWiringMethod,
-		AgentCapabilities:   adapter.Capabilities(),
+		AgentCapabilities:   capabilities,
 		LaunchPlan:          launchPlan,
+		ExpectedActions:     normalizedExpectedActions(expectedActions),
+		BudgetLimits:        budgetLimits,
+		PreflightTools:      preflightTools,
 		ControlledCI:        cfg.ControlledCI,
 		Principal:           verifiedIdentity.Principal,
 		Environment:         verifiedIdentity.Environment,
 		CIIdentity:          verifiedIdentity.CI,
 		CredentialExposure:  verifiedIdentity.CredentialExposure,
+		Artifacts:           artifacts,
 	}
 	if !dryRun {
 		output.AgentVersion = discoverJobAgentVersion(adapter)
 	}
-	_ = logging.New(stderr).Info("job.plan", map[string]any{
-		"agent":         output.Agent,
-		"principal":     output.Principal,
-		"environment":   output.Environment,
-		"ci_provider":   output.CIIdentity.Provider,
-		"profile":       output.Profile,
-		"policy_bundle": output.PolicyBundle,
-		"workspace":     output.Workspace,
-		"task":          output.Task,
-		"mcp_wiring":    output.MCPWiringMethod,
-		"agent_version": output.AgentVersion,
-	})
-	if !dryRun {
-		if err := writeGeneratedMCPConfig(launchPlan.MCPConfigPath, launchPlan.MCPConfig); err != nil {
-			fmt.Fprintf(stderr, "job run: write mcp config: %v\n", err)
-			return 50
-		}
+	if err := writePreparedJobArtifacts(output); err != nil {
+		fmt.Fprintf(stderr, "job run: prepare artifacts: %v\n", err)
+		return jobkit.ExitInternalError
 	}
+	_ = logging.New(stderr).Info("job.plan", map[string]any{
+		"agent":          output.Agent,
+		"principal":      output.Principal,
+		"environment":    output.Environment,
+		"ci_provider":    output.CIIdentity.Provider,
+		"profile":        output.Profile,
+		"policy_bundle":  output.PolicyBundle,
+		"workspace":      output.Workspace,
+		"task":           output.Task,
+		"mcp_wiring":     output.MCPWiringMethod,
+		"agent_version":  output.AgentVersion,
+		"artifact_dir":   output.ArtifactDir,
+		"expected_count": len(output.ExpectedActions),
+	})
+
+	before := jobkit.GitStatus(workspaceAbs)
+	start := jobNow().UTC()
 	if dryRun || noLaunch {
+		mode := jobkit.ReasonDryRun
+		if noLaunch {
+			mode = jobkit.ReasonNoLaunch
+		}
+		changed := jobkit.DiffChangedFiles(before, before)
+		result := jobkit.Evaluate(jobkit.EvaluationInput{
+			Mode:            mode,
+			ExpectedActions: output.ExpectedActions,
+			ChangedFiles:    changed,
+			StartTime:       start,
+			EndTime:         start,
+			BudgetLimits:    budgetLimits,
+		})
+		if err := writeFinalJobArtifacts(output, changed, result); err != nil {
+			fmt.Fprintf(stderr, "job run: write artifacts: %v\n", err)
+			return jobkit.ExitInternalError
+		}
 		if err := writeJSON(stdout, output); err != nil {
 			fmt.Fprintf(stderr, "job run: write output: %v\n", err)
-			return 50
+			return jobkit.ExitInternalError
 		}
-		return 0
+		return result.ExitCode
 	}
-	if err := launchJobAgent(launchPlan, stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "job run: launch agent: %v\n", err)
-		return 20
+
+	launchStdout, closeLaunchOutput, err := agentLaunchWriter(output, stdout)
+	if err != nil {
+		fmt.Fprintf(stderr, "job run: prepare agent output: %v\n", err)
+		return jobkit.ExitInternalError
 	}
-	return 0
+	launchErr := launchJobAgent(launchPlan, launchStdout, stderr)
+	if closeErr := closeLaunchOutput(); closeErr != nil && launchErr == nil {
+		launchErr = closeErr
+	}
+	end := jobNow().UTC()
+	after := jobkit.GitStatus(workspaceAbs)
+	changed := jobkit.DiffChangedFiles(before, after)
+	auditEvents, err := jobkit.ReadAuditEvents(artifacts.Audit)
+	if err != nil {
+		fmt.Fprintf(stderr, "job run: read audit: %v\n", err)
+		return jobkit.ExitInternalError
+	}
+	agentMessage, _ := readOptionalText(artifacts.AgentMessage)
+	result := jobkit.Evaluate(jobkit.EvaluationInput{
+		ExpectedActions:      output.ExpectedActions,
+		AuditEvents:          auditEvents,
+		ChangedFiles:         changed,
+		AgentExitErr:         launchErr,
+		AgentMessage:         agentMessage,
+		AgentMessageExpected: artifacts.AgentMessage != "",
+		StartTime:            start,
+		EndTime:              end,
+		BudgetLimits:         budgetLimits,
+	})
+	if err := writeFinalJobArtifacts(output, changed, result); err != nil {
+		fmt.Fprintf(stderr, "job run: write artifacts: %v\n", err)
+		return jobkit.ExitInternalError
+	}
+	writeJobSummary(stderr, output, result)
+	return result.ExitCode
 }
 
 func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, workspace, bundlePath, profileName string, controlledCI bool, policyInputFlags policyInputFlagValues) {
@@ -270,15 +395,15 @@ func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPat
 
 func selectJobRunMode(dryRun, noLaunch bool) string {
 	if dryRun {
-		return "dry_run"
+		return jobkit.ReasonDryRun
 	}
 	if noLaunch {
-		return "no_launch"
+		return jobkit.ReasonNoLaunch
 	}
 	return "run"
 }
 
-func buildJobMCPArgs(selection loadedPolicy, cfg runtimeconfig.Values, workspace string, id identity.VerifiedIdentity) []string {
+func buildJobMCPArgs(selection loadedPolicy, cfg runtimeconfig.Values, workspace, artifactDir string, id identity.VerifiedIdentity) []string {
 	args := []string{"mcp"}
 	switch selection.Source {
 	case "embedded_profile":
@@ -298,6 +423,7 @@ func buildJobMCPArgs(selection loadedPolicy, cfg runtimeconfig.Values, workspace
 	}
 	args = append(args,
 		"--workspace", workspace,
+		"--artifact-dir", artifactDir,
 		"--principal", id.Principal,
 		"--agent", id.Agent,
 		"--environment", id.Environment,
@@ -331,4 +457,168 @@ func launchPlannedAgent(plan agentkit.LaunchPlan, stdout, stderr io.Writer) erro
 	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(), plan.Env...)
 	return cmd.Run()
+}
+
+func resolveJobWorkspace(raw string) (string, error) {
+	abs, err := filepath.Abs(defaultString(raw, "."))
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("workspace does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace is not a directory: %s", abs)
+	}
+	return abs, nil
+}
+
+func resolveJobArtifactDir(workspace, raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return filepath.Join(workspace, ".prodclaw", "job"), nil
+	}
+	if filepath.IsAbs(raw) {
+		return filepath.Abs(raw)
+	}
+	return filepath.Abs(filepath.Join(workspace, raw))
+}
+
+func newJobArtifactPaths(dir string) jobArtifactPaths {
+	return jobArtifactPaths{
+		Plan:           filepath.Join(dir, "job-plan.json"),
+		Launch:         filepath.Join(dir, "agent-launch.json"),
+		MCPConfig:      filepath.Join(dir, "mcp-config.json"),
+		Audit:          filepath.Join(dir, "audit.jsonl"),
+		ChangedFiles:   filepath.Join(dir, "changed-files.json"),
+		Result:         filepath.Join(dir, "job-result.json"),
+		AgentArtifacts: filepath.Join(dir, "agent-artifacts"),
+	}
+}
+
+func normalizedExpectedActions(values []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func invalidBudgetLimits(limits jobkit.BudgetLimits) bool {
+	return limits.WallClockMS < 0 ||
+		limits.ToolCalls < 0 ||
+		limits.ExecCalls < 0 ||
+		limits.NetworkCalls < 0 ||
+		limits.ReturnedBytes < 0 ||
+		limits.ArtifactBytes < 0
+}
+
+func buildGovernedJobPrompt(workspace, taskPath, task string) string {
+	return "Run this ProdClaw-governed CI job in workspace " + workspace + ".\n" +
+		"Use only ProdClaw MCP tools for file writes, patching, shell/git commands, HTTP requests, upstream tools, and artifacts.\n" +
+		"Do not use native shell, native file-write, native patch, native HTTP, or raw upstream MCP tools for side effects.\n" +
+		"If ProdClaw denies a required action, stop and explain the policy gap instead of bypassing it.\n" +
+		"Task file: " + taskPath + "\n\n" + task
+}
+
+func probeJobTools(bundle policy.Bundle, workspace, artifactDir, auditPath string, id identity.VerifiedIdentity) ([]string, error) {
+	server, err := mcp.NewServer(mcp.Options{
+		Bundle:      bundle,
+		Workspace:   workspace,
+		ArtifactDir: artifactDir,
+		AuditPath:   auditPath,
+		Identity:    id,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return server.AdvertisedToolNames(), nil
+}
+
+func writePreparedJobArtifacts(output jobRunOutput) error {
+	if err := os.MkdirAll(output.Artifacts.AgentArtifacts, 0o700); err != nil {
+		return err
+	}
+	if err := writeJSONFile(output.Artifacts.Plan, output); err != nil {
+		return err
+	}
+	if err := writeJSONFile(output.Artifacts.Launch, output.LaunchPlan); err != nil {
+		return err
+	}
+	if err := writeGeneratedMCPConfig(output.Artifacts.MCPConfig, output.LaunchPlan.MCPConfig); err != nil {
+		return err
+	}
+	if err := writeGeneratedMCPConfig(output.LaunchPlan.MCPConfigPath, output.LaunchPlan.MCPConfig); err != nil {
+		return err
+	}
+	return ensureFile(output.Artifacts.Audit)
+}
+
+func writeFinalJobArtifacts(output jobRunOutput, changed jobkit.ChangedFilesSummary, result jobkit.Result) error {
+	if err := writeJSONFile(output.Artifacts.ChangedFiles, changed); err != nil {
+		return err
+	}
+	return writeJSONFile(output.Artifacts.Result, result)
+}
+
+func writeJSONFile(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func ensureFile(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
+func agentLaunchWriter(output jobRunOutput, stdout io.Writer) (io.Writer, func() error, error) {
+	if output.Artifacts.AgentMessage == "" || output.AgentCapabilities.FinalOutputCapture != "stdout" {
+		return stdout, func() error { return nil }, nil
+	}
+	file, err := os.Create(output.Artifacts.AgentMessage)
+	if err != nil {
+		return nil, nil, err
+	}
+	return io.MultiWriter(stdout, file), file.Close, nil
+}
+
+func readOptionalText(path string) (string, bool) {
+	if strings.TrimSpace(path) == "" {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
+}
+
+func writeJobSummary(out io.Writer, output jobRunOutput, result jobkit.Result) {
+	_, _ = fmt.Fprintln(out, "ProdClaw job complete")
+	_, _ = fmt.Fprintf(out, "Agent:       %s\n", output.Agent)
+	_, _ = fmt.Fprintf(out, "Artifacts:   %s\n", output.ArtifactDir)
+	_, _ = fmt.Fprintf(out, "Exit reason: %s\n", result.ExitReason)
+	_, _ = fmt.Fprintf(out, "Exit code:   %d\n", result.ExitCode)
 }

@@ -33,6 +33,8 @@ type Event struct {
 	ResultCode         string                             `json:"result_code"`
 	Retryable          bool                               `json:"retryable"`
 	RedactionSummary   executor.RedactionSummary          `json:"redaction_summary"`
+	ReturnedBytes      int                                `json:"returned_bytes,omitempty"`
+	ArtifactBytes      int                                `json:"artifact_bytes,omitempty"`
 	ExecCondition      string                             `json:"exec_condition,omitempty"`
 	HTTPStatusCode     int                                `json:"http_status_code,omitempty"`
 	HTTPFinalResource  string                             `json:"http_final_resource,omitempty"`

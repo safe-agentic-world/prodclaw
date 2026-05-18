@@ -71,3 +71,5 @@ Choose exactly one policy source:
 - `policy_inputs` for explicit ordered layers. Layers are merged in fixed order: `baseline`, `organization`, `repository`, `environment`, `job`.
 
 Layer hashes are optional but, when provided, must be valid SHA-256 values and must match the loaded source bundle. No built-in profile is silently added to a customer bundle or layered configuration.
+
+Job-only runtime flags such as `--artifact-dir`, `--expect-action`, and budget limits are intentionally explicit CLI inputs rather than persisted config fields. They describe the current CI run, not the reusable policy source.

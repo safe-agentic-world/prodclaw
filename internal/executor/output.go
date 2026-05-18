@@ -17,6 +17,7 @@ const (
 
 	ResultSuccess         = "success"
 	ResultDeniedPolicy    = "denied_policy"
+	ResultBudgetExceeded  = "budget_exhausted"
 	ResultInvalidRequest  = "invalid_request"
 	ResultExecutionFailed = "execution_failed"
 	ResultTimeout         = "timeout"
@@ -32,6 +33,8 @@ type Outcome struct {
 	ResultCode        string
 	Retryable         bool
 	RedactionSummary  RedactionSummary
+	ReturnedBytes     int
+	ArtifactBytes     int
 	HTTPStatusCode    int
 	HTTPFinalResource string
 	HTTPRedirectHops  int

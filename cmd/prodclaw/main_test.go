@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	agentkit "github.com/safe-agentic-world/prodclaw/internal/agent"
+	"github.com/safe-agentic-world/prodclaw/internal/audit"
+	"github.com/safe-agentic-world/prodclaw/internal/executor"
+	jobkit "github.com/safe-agentic-world/prodclaw/internal/job"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
 )
 
@@ -435,7 +439,7 @@ func TestJobRunDryRunSupportsClaudeWithSharedMetadataShape(t *testing.T) {
 	if claude.MCPWiringMethod != agentkit.MCPWiringConfigFlag || !claude.LaunchPlan.MCPAttachmentVerified {
 		t.Fatalf("expected verified claude launch plan, got %+v", claude)
 	}
-	if got := strings.Join(claude.LaunchPlan.Argv[:2], "\x00"); got != "--mcp-config\x00"+claude.LaunchPlan.MCPConfigPath {
+	if got := strings.Join(claude.LaunchPlan.Argv[:3], "\x00"); got != "--strict-mcp-config\x00--mcp-config\x00"+claude.LaunchPlan.MCPConfigPath {
 		t.Fatalf("unexpected claude launch argv: %+v", claude.LaunchPlan.Argv)
 	}
 	if !sameJSONKeys(codexRaw, claudeRaw) {
@@ -506,6 +510,18 @@ func TestJobRunRealLaunchUsesVerifiedAgentPlan(t *testing.T) {
 			var launched agentkit.LaunchPlan
 			launchJobAgent = func(plan agentkit.LaunchPlan, stdout, stderr io.Writer) error {
 				launched = plan
+				if agentName == "codex" {
+					if path := codexOutputPath(plan.Argv); path != "" {
+						if err := os.WriteFile(path, []byte("Completed.\n"), 0o600); err != nil {
+							return err
+						}
+					}
+				}
+				if agentName == "claude" {
+					if _, err := stdout.Write([]byte("Completed.\n")); err != nil {
+						return err
+					}
+				}
 				return nil
 			}
 			discoverJobAgentVersion = func(agentkit.Builder) string { return agentName + " version" }
@@ -531,11 +547,210 @@ func TestJobRunRealLaunchUsesVerifiedAgentPlan(t *testing.T) {
 					t.Fatalf("unexpected codex launch plan: %+v", launched)
 				}
 			case "claude":
-				if launched.MCPWiringMethod != agentkit.MCPWiringConfigFlag || len(launched.Argv) < 2 || launched.Argv[0] != "--mcp-config" || launched.Argv[1] != launched.MCPConfigPath {
+				if launched.MCPWiringMethod != agentkit.MCPWiringConfigFlag || len(launched.Argv) < 3 || launched.Argv[0] != "--strict-mcp-config" || launched.Argv[1] != "--mcp-config" || launched.Argv[2] != launched.MCPConfigPath {
 					t.Fatalf("unexpected claude launch plan: %+v", launched)
 				}
 			}
 		})
+	}
+}
+
+func TestJobRunDryRunWritesRequiredArtifacts(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := t.TempDir()
+	artifactDir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{
+		"run",
+		"--agent", "codex",
+		"--task", taskPath,
+		"--workspace", workspace,
+		"--artifact-dir", artifactDir,
+		"--probe-tools",
+		"--dry-run",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	for _, path := range []string{
+		got.Artifacts.Plan,
+		got.Artifacts.Launch,
+		got.Artifacts.MCPConfig,
+		got.Artifacts.Audit,
+		got.Artifacts.ChangedFiles,
+		got.Artifacts.Result,
+		got.LaunchPlan.MCPConfigPath,
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected artifact %s: %v", path, err)
+		}
+	}
+	if len(got.PreflightTools) == 0 {
+		t.Fatalf("expected preflight tool probe output, got %+v", got)
+	}
+	var result jobkit.Result
+	readJSONFile(t, got.Artifacts.Result, &result)
+	if result.ExitReason != jobkit.ReasonDryRun || result.ExitCode != jobkit.ExitSuccess {
+		t.Fatalf("unexpected dry-run result: %+v", result)
+	}
+}
+
+func TestJobRunExpectedActionMissingFailsClosed(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := t.TempDir()
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	restore := stubSuccessfulLaunch(t, nil)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{
+		"run",
+		"--agent", "codex",
+		"--task", taskPath,
+		"--workspace", workspace,
+		"--expect-action", "process.exec",
+	}, &stdout, &stderr)
+	if code != jobkit.ExitAgentFailure {
+		t.Fatalf("job run exit code = %d, want %d; stderr=%s", code, jobkit.ExitAgentFailure, stderr.String())
+	}
+	result := readLatestJobResult(t, workspace)
+	if len(result.MissingExpectedActions) != 1 || result.MissingExpectedActions[0] != "process.exec" {
+		t.Fatalf("expected missing process.exec evidence, got %+v", result)
+	}
+}
+
+func TestJobRunPolicyDenialReturnsExit10(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := t.TempDir()
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	restore := stubSuccessfulLaunch(t, func(plan agentkit.LaunchPlan, stdout io.Writer) error {
+		return writeAuditEvent(mcpArgValue(plan, "--audit"), audit.Event{
+			SchemaVersion:     audit.SchemaVersionV1,
+			Timestamp:         "2026-05-18T00:00:00Z",
+			ActionID:          "deny-1",
+			TraceID:           "trace",
+			Tool:              "run_command",
+			ActionType:        "process.exec",
+			Resource:          "file://workspace/",
+			ParamsHash:        strings.Repeat("a", 64),
+			Principal:         "system",
+			Agent:             "codex",
+			Environment:       "local",
+			ActionFingerprint: strings.Repeat("b", 64),
+			Decision:          "DENY",
+			ReasonCode:        "deny_by_rule",
+			MatchedRuleIDs:    []string{"deny"},
+			PolicyBundleHash:  "hash",
+			ResultCode:        executor.ResultDeniedPolicy,
+			RedactionSummary:  executor.RedactionSummary{},
+		})
+	})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{
+		"run",
+		"--agent", "codex",
+		"--task", taskPath,
+		"--workspace", workspace,
+		"--expect-action", "process.exec",
+	}, &stdout, &stderr)
+	if code != jobkit.ExitPolicyDenied {
+		t.Fatalf("job run exit code = %d, want %d; stderr=%s", code, jobkit.ExitPolicyDenied, stderr.String())
+	}
+}
+
+func TestJobRunBudgetExhaustionReturnsExit60(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := t.TempDir()
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	restore := stubSuccessfulLaunch(t, func(plan agentkit.LaunchPlan, stdout io.Writer) error {
+		for idx := 0; idx < 2; idx++ {
+			if err := writeAuditEvent(mcpArgValue(plan, "--audit"), successfulAuditEvent("run_command", "process.exec", "file://workspace/")); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{
+		"run",
+		"--agent", "codex",
+		"--task", taskPath,
+		"--workspace", workspace,
+		"--expect-action", "process.exec",
+		"--max-tool-calls", "1",
+	}, &stdout, &stderr)
+	if code != jobkit.ExitBudgetExhausted {
+		t.Fatalf("job run exit code = %d, want %d; stderr=%s", code, jobkit.ExitBudgetExhausted, stderr.String())
+	}
+}
+
+func TestJobRunMutationWithoutGovernedEvidenceFails(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := initGitWorkspace(t)
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	restore := stubSuccessfulLaunch(t, func(plan agentkit.LaunchPlan, stdout io.Writer) error {
+		return os.WriteFile(filepath.Join(plan.Workspace, "README.md"), []byte("changed\n"), 0o600)
+	})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task", taskPath, "--workspace", workspace}, &stdout, &stderr)
+	if code != jobkit.ExitAgentFailure {
+		t.Fatalf("job run exit code = %d, want %d; stderr=%s", code, jobkit.ExitAgentFailure, stderr.String())
+	}
+	result := readLatestJobResult(t, workspace)
+	if len(result.MissingMutationEvidence) != 1 || result.MissingMutationEvidence[0] != "README.md" {
+		t.Fatalf("expected README.md mutation evidence gap, got %+v", result)
+	}
+}
+
+func TestJobRunSucceedsWithExpectedGovernedMutationEvidence(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := initGitWorkspace(t)
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	restore := stubSuccessfulLaunch(t, func(plan agentkit.LaunchPlan, stdout io.Writer) error {
+		if err := os.WriteFile(filepath.Join(plan.Workspace, "README.md"), []byte("changed\n"), 0o600); err != nil {
+			return err
+		}
+		return writeAuditEvent(mcpArgValue(plan, "--audit"), successfulAuditEvent("write_file", "fs.write", "file://workspace/README.md"))
+	})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{
+		"run",
+		"--agent", "codex",
+		"--task", taskPath,
+		"--workspace", workspace,
+		"--expect-action", "fs.write",
+	}, &stdout, &stderr)
+	if code != jobkit.ExitSuccess {
+		t.Fatalf("job run exit code = %d, want %d; stderr=%s", code, jobkit.ExitSuccess, stderr.String())
+	}
+	result := readLatestJobResult(t, workspace)
+	if result.ExitReason != jobkit.ReasonSuccess || len(result.MissingExpectedActions) != 0 || len(result.MissingMutationEvidence) != 0 {
+		t.Fatalf("expected successful governed mutation result, got %+v", result)
 	}
 }
 
@@ -636,6 +851,130 @@ func mapKeys(values map[string]json.RawMessage) []string {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+func codexOutputPath(argv []string) string {
+	for idx := 0; idx+1 < len(argv); idx++ {
+		if argv[idx] == "-o" {
+			return argv[idx+1]
+		}
+	}
+	return ""
+}
+
+func stubSuccessfulLaunch(t *testing.T, hook func(agentkit.LaunchPlan, io.Writer) error) func() {
+	t.Helper()
+	original := launchJobAgent
+	launchJobAgent = func(plan agentkit.LaunchPlan, stdout, stderr io.Writer) error {
+		if hook != nil {
+			if err := hook(plan, stdout); err != nil {
+				return err
+			}
+		}
+		switch plan.Agent {
+		case agentkit.AgentCodex:
+			if path := codexOutputPath(plan.Argv); path != "" {
+				if err := os.WriteFile(path, []byte("Completed.\n"), 0o600); err != nil {
+					return err
+				}
+			}
+		case agentkit.AgentClaude:
+			if _, err := stdout.Write([]byte("Completed.\n")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return func() { launchJobAgent = original }
+}
+
+func mcpArgValue(plan agentkit.LaunchPlan, name string) string {
+	server := plan.MCPConfig.MCPServers["prodclaw"]
+	for idx := 0; idx+1 < len(server.Args); idx++ {
+		if server.Args[idx] == name {
+			return server.Args[idx+1]
+		}
+	}
+	return ""
+}
+
+func writeAuditEvent(path string, event audit.Event) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	_, err = file.Write(data)
+	return err
+}
+
+func successfulAuditEvent(tool, actionType, resource string) audit.Event {
+	return audit.Event{
+		SchemaVersion:     audit.SchemaVersionV1,
+		Timestamp:         "2026-05-18T00:00:00Z",
+		ActionID:          tool + "-1",
+		TraceID:           "trace",
+		Tool:              tool,
+		ActionType:        actionType,
+		Resource:          resource,
+		ParamsHash:        strings.Repeat("a", 64),
+		Principal:         "system",
+		Agent:             "codex",
+		Environment:       "local",
+		ActionFingerprint: strings.Repeat("b", 64),
+		Decision:          "ALLOW",
+		ReasonCode:        "allow_by_rule",
+		MatchedRuleIDs:    []string{"allow"},
+		PolicyBundleHash:  "hash",
+		ResultCode:        executor.ResultSuccess,
+		RedactionSummary:  executor.RedactionSummary{},
+	}
+}
+
+func readLatestJobResult(t *testing.T, workspace string) jobkit.Result {
+	t.Helper()
+	var result jobkit.Result
+	readJSONFile(t, filepath.Join(workspace, ".prodclaw", "job", "job-result.json"), &result)
+	return result
+}
+
+func readJSONFile(t *testing.T, path string, target any) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read json %s: %v", path, err)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		t.Fatalf("decode json %s: %v\n%s", path, err, data)
+	}
+}
+
+func initGitWorkspace(t *testing.T) string {
+	t.Helper()
+	workspace := t.TempDir()
+	runGit(t, workspace, "init")
+	runGit(t, workspace, "config", "user.email", "ci@example.com")
+	runGit(t, workspace, "config", "user.name", "CI")
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("baseline\n"), 0o600); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	runGit(t, workspace, "add", "README.md")
+	runGit(t, workspace, "commit", "-m", "init")
+	return workspace
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
 }
 
 func escapeJSONPath(path string) string {

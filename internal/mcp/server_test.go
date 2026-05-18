@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -396,6 +397,54 @@ func TestAuthorizeWritesCanonicalAuditEvent(t *testing.T) {
 	}
 	if err := audit.ValidateEventSchema(event); err != nil {
 		t.Fatalf("validate audit schema: %v", err)
+	}
+}
+
+func TestRunCommandAuditShapeIsUniformAcrossAgentIdentities(t *testing.T) {
+	bundle, err := profiles.Load("ci-standard")
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	agents := []string{"codex", "claude"}
+	var keySets [][]string
+	for _, agentName := range agents {
+		t.Run(agentName, func(t *testing.T) {
+			auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+			server, err := NewServer(Options{
+				Bundle:    bundle,
+				Workspace: t.TempDir(),
+				AuditPath: auditPath,
+				Identity:  identity.VerifiedIdentity{Principal: "system", Agent: agentName, Environment: "ci"},
+			})
+			if err != nil {
+				t.Fatalf("new server: %v", err)
+			}
+			server.commandExec = func(ctx context.Context, workspace string, req commandRequest) commandResult {
+				return commandResult{Stdout: "ok\n"}
+			}
+			if _, err := server.runCommand(context.Background(), json.RawMessage(`{"argv":["git","status"]}`)); err != nil {
+				t.Fatalf("run command: %v", err)
+			}
+			data, err := os.ReadFile(auditPath)
+			if err != nil {
+				t.Fatalf("read audit: %v", err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(bytes.TrimSpace(data), &raw); err != nil {
+				t.Fatalf("decode raw audit: %v", err)
+			}
+			var event audit.Event
+			if err := json.Unmarshal(bytes.TrimSpace(data), &event); err != nil {
+				t.Fatalf("decode audit event: %v", err)
+			}
+			if event.Decision != "ALLOW" || event.ResultCode != executor.ResultSuccess || event.ActionType != "process.exec" {
+				t.Fatalf("unexpected audit semantics for %s: %+v", agentName, event)
+			}
+			keySets = append(keySets, sortedJSONKeys(raw))
+		})
+	}
+	if len(keySets) != 2 || strings.Join(keySets[0], ",") != strings.Join(keySets[1], ",") {
+		t.Fatalf("audit keys differ across agents: %+v", keySets)
 	}
 }
 
@@ -812,6 +861,15 @@ func mustMarshal(t *testing.T, value any) string {
 		t.Fatalf("marshal: %v", err)
 	}
 	return string(data)
+}
+
+func sortedJSONKeys(values map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func mustBundle(t *testing.T, data string) policy.Bundle {
