@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":"claude-tools-call","method":"tools/call","params":{"name":"run_command","input":{"argv":["git","status"]}}}

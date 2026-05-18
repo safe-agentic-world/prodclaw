@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -91,6 +92,16 @@ type commandRequest struct {
 	ShellMode        bool     `json:"shell_mode"`
 	OutputMaxBytes   int      `json:"output_max_bytes"`
 	OutputMaxLines   int      `json:"output_max_lines"`
+}
+
+type toolSpec struct {
+	Friendly    string
+	Canonical   string
+	ActionType  string
+	Description string
+	Properties  map[string]any
+	Required    []string
+	ReadOnly    bool
 }
 
 type authorizedAction struct {
@@ -209,7 +220,7 @@ func (s *Server) handleRequest(ctx context.Context, req rpcRequest) rpcResponse 
 	id := decodeID(req.ID)
 	result, err := s.dispatch(ctx, req)
 	if err != nil {
-		return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32000, Message: err.Error()}}
+		return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32000, Message: s.redactor.RedactText(err.Error())}}
 	}
 	return rpcResponse{JSONRPC: "2.0", ID: id, Result: result}
 }
@@ -228,21 +239,15 @@ func (s *Server) dispatch(ctx context.Context, req rpcRequest) (any, error) {
 			},
 		}, nil
 	case "tools/list":
-		return map[string]any{"tools": toolDefinitions()}, nil
+		return map[string]any{"tools": s.toolDefinitions(), "capabilities": s.capabilitySummary()}, nil
 	case "tools/call":
 		name, args, err := parseToolCallParams(req.Params)
 		if err != nil {
-			return map[string]any{
-				"content": []map[string]string{{"type": "text", "text": err.Error()}},
-				"isError": true,
-			}, nil
+			return s.toolErrorResult(err), nil
 		}
 		result, err := s.callTool(ctx, name, args)
 		if err != nil {
-			return map[string]any{
-				"content": []map[string]string{{"type": "text", "text": err.Error()}},
-				"isError": true,
-			}, nil
+			return s.toolErrorResult(err), nil
 		}
 		return result, nil
 	case "ping":
@@ -355,50 +360,144 @@ func writeJSONLine(writer *bufio.Writer, payload any) error {
 	return writer.Flush()
 }
 
-func toolDefinitions() []map[string]any {
-	return []map[string]any{
-		tool("read_file", "Read a workspace file through ProdClaw policy.", map[string]any{
-			"path": map[string]any{"type": "string"},
-		}, []string{"path"}),
-		tool("write_file", "Write a workspace file through ProdClaw policy.", map[string]any{
-			"path":    map[string]any{"type": "string"},
-			"content": map[string]any{"type": "string"},
-		}, []string{"path", "content"}),
-		tool("apply_patch", "Apply a unified diff patch through ProdClaw policy.", map[string]any{
-			"patch": map[string]any{"type": "string"},
-		}, []string{"patch"}),
-		tool("run_command", "Run a command through ProdClaw process.exec policy.", map[string]any{
-			"argv":               map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			"cwd":                map[string]any{"type": "string"},
-			"env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			"stdin_mode":         map[string]any{"type": "string"},
-			"shell_mode":         map[string]any{"type": "boolean"},
-			"output_max_bytes":   map[string]any{"type": "integer"},
-			"output_max_lines":   map[string]any{"type": "integer"},
-		}, []string{"argv"}),
-		tool("http_request", "Send an HTTP request through ProdClaw net.http_request policy.", map[string]any{
-			"url":                map[string]any{"type": "string"},
-			"method":             map[string]any{"type": "string"},
-			"headers":            map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
-			"body":               map[string]any{"type": "string"},
-			"credential_env_key": map[string]any{"type": "string"},
-			"credential_header":  map[string]any{"type": "string"},
-			"output_max_bytes":   map[string]any{"type": "integer"},
-			"output_max_lines":   map[string]any{"type": "integer"},
-		}, []string{"url"}),
-		tool("call_tool", "Forward an upstream tool call through ProdClaw mcp.call policy.", map[string]any{
-			"server":    map[string]any{"type": "string"},
-			"tool":      map[string]any{"type": "string"},
-			"arguments": map[string]any{"type": "object"},
-		}, []string{"server", "tool"}),
-		tool("write_artifact", "Write a job artifact through ProdClaw artifact.write policy.", map[string]any{
-			"path":    map[string]any{"type": "string"},
-			"content": map[string]any{"type": "string"},
-		}, []string{"path", "content"}),
+func baseToolSpecs() []toolSpec {
+	return []toolSpec{
+		{
+			Friendly:    "capabilities",
+			Canonical:   "ProdClaw.capabilities",
+			Description: "Return the policy-derived capability contract for this MCP session.",
+			Properties:  map[string]any{},
+			ReadOnly:    true,
+		},
+		{
+			Friendly:    "read_file",
+			Canonical:   "ProdClaw.read_file",
+			ActionType:  "fs.read",
+			Description: "Read a workspace file through ProdClaw policy.",
+			Properties: map[string]any{
+				"path": map[string]any{"type": "string"},
+			},
+			Required: []string{"path"},
+			ReadOnly: true,
+		},
+		{
+			Friendly:    "write_file",
+			Canonical:   "ProdClaw.write_file",
+			ActionType:  "fs.write",
+			Description: "Write a workspace file through ProdClaw policy.",
+			Properties: map[string]any{
+				"path":    map[string]any{"type": "string"},
+				"content": map[string]any{"type": "string"},
+			},
+			Required: []string{"path", "content"},
+		},
+		{
+			Friendly:    "apply_patch",
+			Canonical:   "ProdClaw.apply_patch",
+			ActionType:  "repo.apply_patch",
+			Description: "Apply a unified diff patch through ProdClaw policy.",
+			Properties: map[string]any{
+				"patch": map[string]any{"type": "string"},
+			},
+			Required: []string{"patch"},
+		},
+		{
+			Friendly:    "run_command",
+			Canonical:   "ProdClaw.run_command",
+			ActionType:  "process.exec",
+			Description: "Run a command through ProdClaw process.exec policy.",
+			Properties: map[string]any{
+				"argv":               map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"cwd":                map[string]any{"type": "string"},
+				"env_allowlist_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"stdin_mode":         map[string]any{"type": "string"},
+				"shell_mode":         map[string]any{"type": "boolean"},
+				"output_max_bytes":   map[string]any{"type": "integer"},
+				"output_max_lines":   map[string]any{"type": "integer"},
+			},
+			Required: []string{"argv"},
+		},
+		{
+			Friendly:    "http_request",
+			Canonical:   "ProdClaw.http_request",
+			ActionType:  "net.http_request",
+			Description: "Send an HTTP request through ProdClaw net.http_request policy.",
+			Properties: map[string]any{
+				"url":                map[string]any{"type": "string"},
+				"method":             map[string]any{"type": "string"},
+				"headers":            map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+				"body":               map[string]any{"type": "string"},
+				"credential_env_key": map[string]any{"type": "string"},
+				"credential_header":  map[string]any{"type": "string"},
+				"output_max_bytes":   map[string]any{"type": "integer"},
+				"output_max_lines":   map[string]any{"type": "integer"},
+			},
+			Required: []string{"url"},
+		},
+		{
+			Friendly:    "call_tool",
+			Canonical:   "ProdClaw.call_tool",
+			ActionType:  "mcp.call",
+			Description: "Forward an upstream tool call through ProdClaw mcp.call policy.",
+			Properties: map[string]any{
+				"server":    map[string]any{"type": "string"},
+				"tool":      map[string]any{"type": "string"},
+				"arguments": map[string]any{"type": "object"},
+			},
+			Required: []string{"server", "tool"},
+		},
+		{
+			Friendly:    "write_artifact",
+			Canonical:   "ProdClaw.write_artifact",
+			ActionType:  "artifact.write",
+			Description: "Write a job artifact through ProdClaw artifact.write policy.",
+			Properties: map[string]any{
+				"path":    map[string]any{"type": "string"},
+				"content": map[string]any{"type": "string"},
+			},
+			Required: []string{"path", "content"},
+		},
 	}
 }
 
+func (s *Server) toolDefinitions() []map[string]any {
+	specs := baseToolSpecs()
+	tools := make([]map[string]any, 0, len(specs)*2)
+	for _, spec := range specs {
+		tools = append(tools, s.toolDefinition(spec, spec.Friendly))
+		tools = append(tools, s.toolDefinition(spec, spec.Canonical))
+	}
+	return tools
+}
+
+func (s *Server) toolDefinition(spec toolSpec, name string) map[string]any {
+	entry := tool(name, spec.Description, spec.Properties, spec.Required)
+	entry["annotations"] = map[string]any{
+		"readOnlyHint":    spec.ReadOnly,
+		"destructiveHint": !spec.ReadOnly,
+	}
+	entry["_meta"] = map[string]any{
+		"prodclaw": map[string]any{
+			"canonical_name":       spec.Canonical,
+			"friendly_name":        spec.Friendly,
+			"aliases":              []string{spec.Friendly, spec.Canonical},
+			"action_type":          spec.ActionType,
+			"capability":           s.capabilityForActionType(spec.ActionType),
+			"identity":             s.capabilityIdentity(),
+			"runtime":              s.capabilityRuntime(),
+			"adapter_capabilities": s.adapterCapabilities(),
+		},
+	}
+	return entry
+}
+
 func tool(name, description string, properties map[string]any, required []string) map[string]any {
+	if properties == nil {
+		properties = map[string]any{}
+	}
+	if required == nil {
+		required = []string{}
+	}
 	return map[string]any{
 		"name":        name,
 		"description": description,
@@ -411,8 +510,249 @@ func tool(name, description string, properties map[string]any, required []string
 	}
 }
 
+func (s *Server) capabilitySummary() map[string]any {
+	specs := baseToolSpecs()
+	advertised := make([]string, 0, len(specs)*2)
+	enabled := make([]string, 0, len(specs))
+	unavailable := make([]string, 0, len(specs))
+	toolStates := make(map[string]any, len(specs))
+	for _, spec := range specs {
+		advertised = append(advertised, spec.Friendly, spec.Canonical)
+		capability := s.capabilityForActionType(spec.ActionType)
+		state, _ := capability["state"].(string)
+		if state == "allow" {
+			enabled = append(enabled, spec.Canonical)
+		} else {
+			unavailable = append(unavailable, spec.Canonical)
+		}
+		toolStates[spec.Canonical] = map[string]any{
+			"canonical_name": spec.Canonical,
+			"friendly_name":  spec.Friendly,
+			"action_type":    spec.ActionType,
+			"capability":     capability,
+		}
+	}
+	sort.Strings(advertised)
+	sort.Strings(enabled)
+	sort.Strings(unavailable)
+	return map[string]any{
+		"contract_version":       "prodclaw.mcp.capabilities.v1",
+		"advisory_only":          true,
+		"authorization_notice":   "Advisory only. ProdClaw evaluates every action live against policy and runtime controls.",
+		"policy_bundle_hash":     s.bundle.Hash,
+		"tool_advertisement":     "static_supported_tools_with_policy_capability_metadata",
+		"advertised_tools":       advertised,
+		"enabled_tools":          enabled,
+		"unavailable_tools":      unavailable,
+		"tool_states":            toolStates,
+		"identity":               s.capabilityIdentity(),
+		"runtime":                s.capabilityRuntime(),
+		"adapter_capabilities":   s.adapterCapabilities(),
+		"principal_scope_source": "verified_runtime_identity",
+	}
+}
+
+func (s *Server) capabilityForActionType(actionType string) map[string]any {
+	if strings.TrimSpace(actionType) == "" {
+		return map[string]any{
+			"state":                "allow",
+			"advisory":             true,
+			"immediately_callable": true,
+			"resource_classes":     []string{},
+			"host_classes":         []string{},
+			"exec_classes":         []string{},
+		}
+	}
+	capability := policy.NewEngine(s.bundle).CapabilityForActionType(actionType, s.id.Principal, s.id.Agent, s.id.Environment)
+	return map[string]any{
+		"state":                capability.State(),
+		"advisory":             true,
+		"immediately_callable": capability.Allow,
+		"resource_classes":     append([]string{}, capability.ResourceClasses...),
+		"host_classes":         append([]string{}, capability.HostClasses...),
+		"exec_classes":         append([]string{}, capability.ExecClasses...),
+	}
+}
+
+func (s *Server) capabilityIdentity() map[string]any {
+	return map[string]any{
+		"principal":   s.id.Principal,
+		"agent":       s.id.Agent,
+		"environment": s.id.Environment,
+		"ci": map[string]any{
+			"provider":   s.id.CI.Provider,
+			"project":    s.id.CI.Project,
+			"repo":       s.id.CI.Repo,
+			"ref":        s.id.CI.Ref,
+			"branch":     s.id.CI.Branch,
+			"commit_sha": s.id.CI.CommitSHA,
+			"run_id":     s.id.CI.RunID,
+			"job_id":     s.id.CI.JobID,
+			"actor":      s.id.CI.Actor,
+			"event_type": s.id.CI.EventType,
+		},
+	}
+}
+
+func (s *Server) capabilityRuntime() map[string]any {
+	return map[string]any{
+		"environment":         s.id.Environment,
+		"ci_provider":         s.id.CI.Provider,
+		"policy_bundle_hash":  s.bundle.Hash,
+		"workspace_confined":  true,
+		"artifact_confined":   true,
+		"credential_boundary": "executor_only",
+	}
+}
+
+func (s *Server) adapterCapabilities() map[string]any {
+	return map[string]any{
+		"stdio":                   true,
+		"content_length_framing":  true,
+		"json_line_framing":       true,
+		"tool_call_arguments_key": true,
+		"tool_call_input_key":     true,
+		"structured_tool_errors":  true,
+	}
+}
+
+func normalizeToolName(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	for _, spec := range baseToolSpecs() {
+		if name == spec.Friendly || name == spec.Canonical {
+			return spec.Friendly, true
+		}
+	}
+	return name, false
+}
+
+func (s *Server) toolErrorResult(err error) map[string]any {
+	message := "invalid tool request"
+	if err != nil {
+		message = err.Error()
+	}
+	message = s.redactor.RedactText(message)
+	return map[string]any{
+		"content":     []map[string]string{{"type": "text", "text": message}},
+		"isError":     true,
+		"result_code": executor.ResultInvalidRequest,
+	}
+}
+
+func unsupportedContentPlaceholder(kind, reason string) map[string]any {
+	if strings.TrimSpace(kind) == "" {
+		kind = "unknown"
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "unsupported"
+	}
+	return map[string]any{
+		"type": "text",
+		"text": "[ProdClaw unsupported MCP content block: kind=" + kind + " reason=" + reason + "]",
+		"_meta": map[string]any{
+			"prodclaw_unsupported_content_block": true,
+			"blocked_kind":                       kind,
+			"reason":                             reason,
+		},
+	}
+}
+
+func normalizeForwardedMCPResult(value any) any {
+	root, ok := cloneJSONMap(value)
+	if !ok {
+		return value
+	}
+	rawContent, ok := root["content"]
+	if !ok {
+		return root
+	}
+	content, ok := rawContent.([]any)
+	if !ok {
+		root["content"] = []any{unsupportedContentPlaceholder("unknown", "content is not an array")}
+		root["unsupported_content_blocks"] = []map[string]any{{"kind": "unknown", "reason": "content is not an array"}}
+		return root
+	}
+	normalized := make([]any, 0, len(content))
+	unsupported := make([]map[string]any, 0)
+	for _, item := range content {
+		block, ok := item.(map[string]any)
+		if !ok {
+			normalized = append(normalized, unsupportedContentPlaceholder("unknown", "content block is not an object"))
+			unsupported = append(unsupported, map[string]any{"kind": "unknown", "reason": "content block is not an object"})
+			continue
+		}
+		kind, _ := block["type"].(string)
+		if kind == "text" {
+			if _, ok := block["text"].(string); ok {
+				normalized = append(normalized, block)
+				continue
+			}
+			normalized = append(normalized, unsupportedContentPlaceholder("text", "text field is missing or not a string"))
+			unsupported = append(unsupported, map[string]any{"kind": "text", "reason": "text field is missing or not a string"})
+			continue
+		}
+		normalized = append(normalized, unsupportedContentPlaceholder(kind, "non-text MCP content is not forwarded to CI agents"))
+		unsupported = append(unsupported, map[string]any{"kind": firstNonEmptyString(kind, "unknown"), "reason": "non-text MCP content is not forwarded to CI agents"})
+	}
+	root["content"] = normalized
+	if len(unsupported) > 0 {
+		root["unsupported_content_blocks"] = unsupported
+	}
+	return root
+}
+
+func cloneJSONMap(value any) (map[string]any, bool) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, false
+	}
+	return root, true
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func validateJSONObject(raw json.RawMessage, field string) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if trimmed[0] != '{' {
+		return fmt.Errorf("%s must be a JSON object", field)
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	var object map[string]json.RawMessage
+	if err := dec.Decode(&object); err != nil {
+		return fmt.Errorf("%s must be a valid JSON object: %w", field, err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("%s must contain one JSON object", field)
+	}
+	return nil
+}
+
 func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage) (any, error) {
+	name, ok := normalizeToolName(name)
+	if !ok {
+		return nil, fmt.Errorf("unknown tool %q", s.redactor.RedactText(name))
+	}
 	switch name {
+	case "capabilities":
+		data, err := json.MarshalIndent(s.capabilitySummary(), "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"content": []map[string]any{{"type": "text", "text": s.redactor.RedactText(string(data))}}, "isError": false, "result_code": executor.ResultSuccess}, nil
 	case "read_file":
 		return s.readFile(ctx, args)
 	case "write_file":
@@ -428,7 +768,7 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 	case "write_artifact":
 		return s.writeArtifact(ctx, args)
 	default:
-		return nil, fmt.Errorf("unknown tool %q", name)
+		return nil, fmt.Errorf("unknown tool %q", s.redactor.RedactText(name))
 	}
 }
 
@@ -664,6 +1004,9 @@ func (s *Server) callToolForward(ctx context.Context, args json.RawMessage) (any
 	if len(bytes.TrimSpace(input.Arguments)) == 0 {
 		input.Arguments = json.RawMessage(`{}`)
 	}
+	if err := validateJSONObject(input.Arguments, "arguments"); err != nil {
+		return nil, err
+	}
 	canonicalArgs, err := canonicaljson.Canonicalize(input.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize tool arguments: %w", err)
@@ -693,7 +1036,7 @@ func (s *Server) callToolForward(ctx context.Context, args json.RawMessage) (any
 	if err != nil {
 		return s.failureResult(auth, err), nil
 	}
-	return s.jsonResult(auth, result, executor.ResultSuccess, false, false, 0, 0), nil
+	return s.jsonResult(auth, normalizeForwardedMCPResult(result), executor.ResultSuccess, false, false, 0, 0), nil
 }
 
 func (s *Server) writeArtifact(ctx context.Context, args json.RawMessage) (any, error) {

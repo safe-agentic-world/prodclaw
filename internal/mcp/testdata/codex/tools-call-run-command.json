@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":"codex-tools-call","method":"tools/call","params":{"name":"ProdClaw.run_command","arguments":{"argv":["git","status"]}}}

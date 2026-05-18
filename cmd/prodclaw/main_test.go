@@ -118,6 +118,20 @@ func TestPolicyCheckUsesBuiltInProfile(t *testing.T) {
 	}
 }
 
+func TestMCPReadinessLogsToStderrOnly(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runMCP([]string{"--profile", "ci-standard"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("mcp exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("expected MCP stdout to stay protocol-only and empty without requests, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "mcp.start") {
+		t.Fatalf("expected readiness log on stderr, got %q", stderr.String())
+	}
+}
+
 func TestPolicyCheckRejectsBundleAndProfileTogether(t *testing.T) {
 	bundle, actionFile := writePolicyFixture(t, "ALLOW")
 	var stdout, stderr bytes.Buffer

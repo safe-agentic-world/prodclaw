@@ -17,6 +17,7 @@ import (
 
 	"github.com/safe-agentic-world/prodclaw/internal/audit"
 	"github.com/safe-agentic-world/prodclaw/internal/executor"
+	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
 	"github.com/safe-agentic-world/prodclaw/profiles"
 )
@@ -141,6 +142,210 @@ func TestServerSupportsFramedStdio(t *testing.T) {
 	resp := readFramedResponse(t, bufio.NewReader(bytes.NewReader(out.Bytes())))
 	if resp["error"] != nil {
 		t.Fatalf("unexpected framed response error: %+v", resp["error"])
+	}
+}
+
+func TestMCPContractFixturesCodexAndClaude(t *testing.T) {
+	bundle, err := profiles.Load("ci-standard")
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	cases := []struct {
+		name        string
+		fixture     string
+		expectCall  bool
+		expectTools []string
+	}{
+		{
+			name:        "codex tools list",
+			fixture:     "testdata/codex/tools-list.json",
+			expectTools: []string{"run_command", "ProdClaw.run_command", "http_request", "ProdClaw.http_request", "call_tool", "ProdClaw.call_tool"},
+		},
+		{
+			name:       "codex canonical tools call",
+			fixture:    "testdata/codex/tools-call-run-command.json",
+			expectCall: true,
+		},
+		{
+			name:        "claude tools list",
+			fixture:     "testdata/claude/tools-list.json",
+			expectTools: []string{"run_command", "ProdClaw.run_command", "http_request", "ProdClaw.http_request", "call_tool", "ProdClaw.call_tool"},
+		},
+		{
+			name:       "claude input tools call",
+			fixture:    "testdata/claude/tools-call-run-command-input.json",
+			expectCall: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir()})
+			if err != nil {
+				t.Fatalf("new server: %v", err)
+			}
+			server.commandExec = func(ctx context.Context, workspace string, req commandRequest) commandResult {
+				return commandResult{Stdout: "ok\n"}
+			}
+			resp := serveFixture(t, server, tc.fixture)
+			if resp.Error != nil {
+				t.Fatalf("unexpected protocol error: %+v", resp.Error)
+			}
+			payload := mustMarshal(t, resp.Result)
+			if tc.expectCall {
+				if !strings.Contains(payload, `"isError":false`) || !strings.Contains(payload, `"result_code":"success"`) {
+					t.Fatalf("expected successful contract call, got %s", payload)
+				}
+				return
+			}
+			for _, name := range tc.expectTools {
+				if !toolListHasName(resp.Result, name) {
+					t.Fatalf("tools/list missing %q in %s", name, payload)
+				}
+			}
+			if !strings.Contains(payload, `"contract_version":"prodclaw.mcp.capabilities.v1"`) ||
+				!strings.Contains(payload, `"principal_scope_source":"verified_runtime_identity"`) {
+				t.Fatalf("tools/list missing capability contract metadata: %s", payload)
+			}
+		})
+	}
+}
+
+func TestToolsListCapabilityUsesPolicyActionCapabilityNotSampleProbes(t *testing.T) {
+	bundle := mustBundle(t, `version: v1
+rules:
+  - id: allow-only-git-status
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["git", "status"]
+  - id: allow-only-gitlab-http
+    action_type: net.http_request
+    resource: url://gitlab.com/api/v4/**
+    decision: ALLOW
+    params_match:
+      method:
+        in: ["GET"]
+`)
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	resp := serveFixture(t, server, "testdata/codex/tools-list.json")
+	if resp.Error != nil {
+		t.Fatalf("unexpected protocol error: %+v", resp.Error)
+	}
+	payload := mustMarshal(t, resp.Result)
+	for _, name := range []string{"run_command", "ProdClaw.run_command", "http_request", "ProdClaw.http_request"} {
+		if !toolListHasName(resp.Result, name) {
+			t.Fatalf("tools/list hid %q despite action capability: %s", name, payload)
+		}
+	}
+	if got := toolCapabilityState(resp.Result, "ProdClaw.run_command"); got != "allow" {
+		t.Fatalf("run_command capability state = %q, want allow in %s", got, payload)
+	}
+	if got := toolCapabilityState(resp.Result, "ProdClaw.http_request"); got != "allow" {
+		t.Fatalf("http_request capability state = %q, want allow in %s", got, payload)
+	}
+}
+
+func TestToolsListCapabilityIsScopedToVerifiedIdentity(t *testing.T) {
+	bundle := mustBundle(t, `version: v1
+rules:
+  - id: allow-codex-exec
+    action_type: process.exec
+    resource: file://workspace/
+    principals: ["gitlab:group/project:alice"]
+    agents: ["codex"]
+    environments: ["ci"]
+    decision: ALLOW
+`)
+	id := identity.VerifiedIdentity{
+		Principal:   "gitlab:group/project:alice",
+		Agent:       "codex",
+		Environment: "ci",
+		CI: identity.CIIdentity{
+			Provider: "gitlab",
+			Project:  "group/project",
+			Actor:    "alice",
+		},
+	}
+	codexServer, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir(), Identity: id})
+	if err != nil {
+		t.Fatalf("new codex server: %v", err)
+	}
+	codexSummary := codexServer.capabilitySummary()
+	codexPayload := mustMarshal(t, codexSummary)
+	if !strings.Contains(codexPayload, `"agent":"codex"`) || toolCapabilityState(codexSummary, "ProdClaw.run_command") != "allow" {
+		t.Fatalf("expected codex identity to expose allowed exec capability, got %s", codexPayload)
+	}
+
+	id.Agent = "claude"
+	claudeServer, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir(), Identity: id})
+	if err != nil {
+		t.Fatalf("new claude server: %v", err)
+	}
+	claudeSummary := claudeServer.capabilitySummary()
+	claudePayload := mustMarshal(t, claudeSummary)
+	if !strings.Contains(claudePayload, `"agent":"claude"`) || toolCapabilityState(claudeSummary, "ProdClaw.run_command") != "unavailable" {
+		t.Fatalf("expected claude identity to see unavailable exec capability, got %s", claudePayload)
+	}
+}
+
+func TestMCPResponseErrorsAreRedactedAndStayInToolResult(t *testing.T) {
+	bundle, err := profiles.Load("ci-standard")
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	in := strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"sk-12345678\",\"arguments\":{}}}\n")
+	var out bytes.Buffer
+	if err := server.Serve(context.Background(), in, &out); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	resp := decodeResponse(t, strings.TrimSpace(out.String()))
+	if resp.Error != nil {
+		t.Fatalf("expected MCP tool result, got protocol error: %+v", resp.Error)
+	}
+	payload := mustMarshal(t, resp.Result)
+	if strings.Contains(payload, "sk-12345678") || !strings.Contains(payload, "[REDACTED]") || !strings.Contains(payload, `"isError":true`) {
+		t.Fatalf("expected redacted structured tool error, got %s", payload)
+	}
+
+	out.Reset()
+	in = strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"sk-abcdefgh\",\"params\":{}}\n")
+	if err := server.Serve(context.Background(), in, &out); err != nil {
+		t.Fatalf("serve protocol error request: %v", err)
+	}
+	resp = decodeResponse(t, strings.TrimSpace(out.String()))
+	if resp.Error == nil {
+		t.Fatalf("expected protocol error")
+	}
+	errorPayload := mustMarshal(t, resp.Error)
+	if strings.Contains(errorPayload, "sk-abcdefgh") || !strings.Contains(errorPayload, "[REDACTED]") {
+		t.Fatalf("expected redacted protocol error, got %s", errorPayload)
+	}
+}
+
+func TestInvalidJSONRequestDoesNotWriteHumanTextToStdout(t *testing.T) {
+	bundle, err := profiles.Load("ci-standard")
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	server, err := NewServer(Options{Bundle: bundle, Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	var out bytes.Buffer
+	if err := server.Serve(context.Background(), strings.NewReader("{not-json}\n"), &out); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "" {
+		t.Fatalf("expected no stdout for invalid request, got %q", out.String())
 	}
 }
 
@@ -274,6 +479,44 @@ rules:
 	}
 	if !strings.Contains(mustMarshal(t, result), `"result_code":"success"`) {
 		t.Fatalf("expected successful forwarded tool result, got %+v", result)
+	}
+}
+
+func TestCallToolValidatesArgumentsObjectAndMarksUnsupportedContent(t *testing.T) {
+	bundle := mustBundle(t, `version: v1
+rules:
+  - id: allow-upstream-tool
+    action_type: mcp.call
+    resource: mcp://retail/refund.request
+    decision: ALLOW
+`)
+	server, err := NewServer(Options{
+		Bundle:    bundle,
+		Workspace: t.TempDir(),
+		ForwardTool: func(ctx context.Context, server, tool string, args json.RawMessage) (any, error) {
+			return map[string]any{
+				"content": []map[string]any{
+					{"type": "text", "text": "approved text"},
+					{"type": "image", "data": "base64-image"},
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	if _, err := server.callToolForward(context.Background(), json.RawMessage(`{"server":"retail","tool":"refund.request","arguments":["bad"]}`)); err == nil || !strings.Contains(err.Error(), "arguments must be a JSON object") {
+		t.Fatalf("expected argument schema validation error, got %v", err)
+	}
+	result, err := server.callToolForward(context.Background(), json.RawMessage(`{"server":"retail","tool":"refund.request","arguments":{"order_id":"ORD-1001"}}`))
+	if err != nil {
+		t.Fatalf("call tool: %v", err)
+	}
+	payload := mustMarshal(t, result)
+	if !strings.Contains(payload, "approved text") ||
+		!strings.Contains(payload, "ProdClaw unsupported MCP content block") ||
+		!strings.Contains(payload, "unsupported_content_blocks") {
+		t.Fatalf("expected text preservation and unsupported content placeholder, got %s", payload)
 	}
 }
 
@@ -502,6 +745,64 @@ func decodeResponse(t *testing.T, line string) rpcResponse {
 		t.Fatalf("decode response: %v\n%s", err, line)
 	}
 	return resp
+}
+
+func serveFixture(t *testing.T, server *Server, fixture string) rpcResponse {
+	t.Helper()
+	data, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", fixture, err)
+	}
+	var out bytes.Buffer
+	if err := server.Serve(context.Background(), bytes.NewReader(append(bytes.TrimSpace(data), '\n')), &out); err != nil {
+		t.Fatalf("serve fixture %s: %v", fixture, err)
+	}
+	return decodeResponse(t, strings.TrimSpace(out.String()))
+}
+
+func toolListHasName(result any, name string) bool {
+	resultMap, ok := result.(map[string]any)
+	if !ok {
+		return false
+	}
+	tools, ok := resultMap["tools"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range tools {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if toolName, _ := tool["name"].(string); toolName == name {
+			return true
+		}
+	}
+	return false
+}
+
+func toolCapabilityState(result any, name string) string {
+	root, ok := result.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if capabilities, ok := root["capabilities"].(map[string]any); ok {
+		root = capabilities
+	}
+	states, ok := root["tool_states"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	tool, ok := states[name].(map[string]any)
+	if !ok {
+		return ""
+	}
+	capability, ok := tool["capability"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	state, _ := capability["state"].(string)
+	return state
 }
 
 func mustMarshal(t *testing.T, value any) string {
