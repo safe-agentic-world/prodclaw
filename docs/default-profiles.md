@@ -18,6 +18,8 @@ prodclaw job run --agent codex --task task.md --dry-run
 
 `profiles list` identifies the embedded source and hash shipped in the running binary. `profiles verify` validates embedded bundles and, when the canonical `profiles/` directory is present, checks that the generated embedded bytes match the canonical YAML. `job run --dry-run` prints the selected profile and the effective policy hash used for execution.
 
+For adapter-specific launch details, see `docs/agent-adapters.md`.
+
 ## Replace A Built-In Profile
 
 Use exactly one of `--profile` or `--policy-bundle`.

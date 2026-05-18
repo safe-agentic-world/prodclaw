@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
+	agentkit "github.com/safe-agentic-world/prodclaw/internal/agent"
 	runtimeconfig "github.com/safe-agentic-world/prodclaw/internal/config"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/logging"
@@ -26,12 +28,19 @@ type jobRunOutput struct {
 	PolicyBundleSources []string                           `json:"policy_bundle_sources,omitempty"`
 	PolicyBundleInputs  []policy.BundleSource              `json:"policy_bundle_inputs,omitempty"`
 	LaunchPlanned       bool                               `json:"launch_planned"`
+	MCPWiringMethod     string                             `json:"mcp_wiring_method"`
+	AgentVersion        string                             `json:"agent_version,omitempty"`
+	AgentCapabilities   agentkit.Capabilities              `json:"agent_capabilities"`
+	LaunchPlan          agentkit.LaunchPlan                `json:"launch_plan"`
 	ControlledCI        bool                               `json:"controlled_ci"`
 	Principal           string                             `json:"principal"`
 	Environment         string                             `json:"environment"`
 	CIIdentity          identity.CIIdentity                `json:"ci_identity,omitempty"`
 	CredentialExposure  identity.CredentialExposureSummary `json:"credential_exposure,omitempty"`
 }
+
+var discoverJobAgentVersion = agentkit.DiscoverVersion
+var launchJobAgent = launchPlannedAgent
 
 func runJob(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
@@ -55,7 +64,8 @@ func printJobHelp(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "notes:")
 	fmt.Fprintln(w, "  - defaults to the embedded ci-strict profile when no policy is provided")
-	fmt.Fprintln(w, "  - current milestone only emits the deterministic launch plan; real launch arrives in the job-runner milestone")
+	fmt.Fprintln(w, "  - dry-run emits the exact per-invocation agent argv and isolated ProdClaw MCP config")
+	fmt.Fprintln(w, "  - real launch starts the selected agent; deterministic post-run gates arrive in the job-runner milestone")
 }
 
 func runJobRun(args []string, stdout, stderr io.Writer) int {
@@ -120,9 +130,10 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "job run: --task must be a file")
 		return 30
 	}
-	if !dryRun && !noLaunch {
-		fmt.Fprintln(stderr, "job run: real agent launch is not implemented yet; use --dry-run or --no-launch")
-		return 20
+	taskBytes, err := os.ReadFile(taskPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "job run: read task: %v\n", err)
+		return 30
 	}
 	if bundlePath == "" && profileName == "" && !cfg.PolicyInputs.HasAny() {
 		profileName = "ci-strict"
@@ -153,8 +164,34 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "job run: runtime identity: %v\n", err)
 		return 40
 	}
+	adapter, err := agentkit.Lookup(agent)
+	if err != nil {
+		fmt.Fprintf(stderr, "job run: adapter: %v\n", err)
+		return 30
+	}
+	mcpConfigPath := filepath.Join(workspaceAbs, ".prodclaw", "agent", adapter.Name()+".mcp.json")
+	mcpArgs := buildJobMCPArgs(selection, cfg, workspaceAbs, verifiedIdentity)
+	mcpConfig, err := agentkit.BuildMCPConfig("prodclaw", mcpArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "job run: build mcp config: %v\n", err)
+		return 30
+	}
+	launchPlan, err := adapter.Build(agentkit.BuildInput{
+		Workspace:     workspaceAbs,
+		TaskPrompt:    string(taskBytes),
+		MCPConfigPath: mcpConfigPath,
+		MCPConfig:     mcpConfig,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "job run: build launch plan: %v\n", err)
+		return 30
+	}
+	if !launchPlan.MCPAttachmentVerified {
+		fmt.Fprintln(stderr, "job run: generated launch plan could not verify ProdClaw MCP attachment")
+		return 40
+	}
 	output := jobRunOutput{
-		Mode:                selectJobRunMode(dryRun),
+		Mode:                selectJobRunMode(dryRun, noLaunch),
 		Agent:               verifiedIdentity.Agent,
 		Task:                taskAbs,
 		Workspace:           workspaceAbs,
@@ -164,12 +201,18 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		PolicySource:        selection.Source,
 		PolicyBundleSources: policy.BundleSourceLabels(selection.Bundle),
 		PolicyBundleInputs:  append([]policy.BundleSource{}, selection.Bundle.SourceBundles...),
-		LaunchPlanned:       false,
+		LaunchPlanned:       true,
+		MCPWiringMethod:     launchPlan.MCPWiringMethod,
+		AgentCapabilities:   adapter.Capabilities(),
+		LaunchPlan:          launchPlan,
 		ControlledCI:        cfg.ControlledCI,
 		Principal:           verifiedIdentity.Principal,
 		Environment:         verifiedIdentity.Environment,
 		CIIdentity:          verifiedIdentity.CI,
 		CredentialExposure:  verifiedIdentity.CredentialExposure,
+	}
+	if !dryRun {
+		output.AgentVersion = discoverJobAgentVersion(adapter)
 	}
 	_ = logging.New(stderr).Info("job.plan", map[string]any{
 		"agent":         output.Agent,
@@ -180,10 +223,25 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		"policy_bundle": output.PolicyBundle,
 		"workspace":     output.Workspace,
 		"task":          output.Task,
+		"mcp_wiring":    output.MCPWiringMethod,
+		"agent_version": output.AgentVersion,
 	})
-	if err := writeJSON(stdout, output); err != nil {
-		fmt.Fprintf(stderr, "job run: write output: %v\n", err)
-		return 50
+	if !dryRun {
+		if err := writeGeneratedMCPConfig(launchPlan.MCPConfigPath, launchPlan.MCPConfig); err != nil {
+			fmt.Fprintf(stderr, "job run: write mcp config: %v\n", err)
+			return 50
+		}
+	}
+	if dryRun || noLaunch {
+		if err := writeJSON(stdout, output); err != nil {
+			fmt.Fprintf(stderr, "job run: write output: %v\n", err)
+			return 50
+		}
+		return 0
+	}
+	if err := launchJobAgent(launchPlan, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "job run: launch agent: %v\n", err)
+		return 20
 	}
 	return 0
 }
@@ -210,9 +268,67 @@ func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPat
 	}
 }
 
-func selectJobRunMode(dryRun bool) string {
+func selectJobRunMode(dryRun, noLaunch bool) string {
 	if dryRun {
 		return "dry_run"
 	}
-	return "no_launch"
+	if noLaunch {
+		return "no_launch"
+	}
+	return "run"
+}
+
+func buildJobMCPArgs(selection loadedPolicy, cfg runtimeconfig.Values, workspace string, id identity.VerifiedIdentity) []string {
+	args := []string{"mcp"}
+	switch selection.Source {
+	case "embedded_profile":
+		args = append(args, "--profile", selection.ProfileName)
+	case "customer_bundle":
+		args = append(args, "--policy-bundle", selection.BundlePath)
+	case "layered_bundles":
+		for _, input := range cfg.PolicyInputs.Ordered() {
+			if strings.TrimSpace(input.Path) == "" {
+				continue
+			}
+			args = append(args, "--policy-"+input.Role, input.Path)
+			if strings.TrimSpace(input.SHA256) != "" {
+				args = append(args, "--policy-"+input.Role+"-sha256", input.SHA256)
+			}
+		}
+	}
+	args = append(args,
+		"--workspace", workspace,
+		"--principal", id.Principal,
+		"--agent", id.Agent,
+		"--environment", id.Environment,
+	)
+	if strings.TrimSpace(cfg.AuditPath) != "" {
+		args = append(args, "--audit", cfg.AuditPath)
+	}
+	return args
+}
+
+func writeGeneratedMCPConfig(path string, config agentkit.MCPClientConfig) error {
+	data, err := agentkit.MarshalMCPConfig(config)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func launchPlannedAgent(plan agentkit.LaunchPlan, stdout, stderr io.Writer) error {
+	binary, err := exec.LookPath(plan.Executable)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(binary, plan.Argv...)
+	cmd.Dir = plan.Workspace
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Env = append(os.Environ(), plan.Env...)
+	return cmd.Run()
 }

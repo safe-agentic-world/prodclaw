@@ -20,6 +20,7 @@ test-results/
 artifacts/
 tmp/
 temp/
+.prodclaw/
 
 # Local Go build/test cache directories if redirected into the repo
 .gocache/

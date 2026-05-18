@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	agentkit "github.com/safe-agentic-world/prodclaw/internal/agent"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
 )
 
@@ -243,6 +245,12 @@ func TestJobRunDryRunDefaultsToCIStrictProfile(t *testing.T) {
 	if got.Profile != "ci-strict" || got.PolicySource != "embedded_profile" || got.PolicyBundleHash == "" {
 		t.Fatalf("expected embedded ci-strict profile metadata, got %+v", got)
 	}
+	if !got.LaunchPlanned || got.MCPWiringMethod != agentkit.MCPWiringCodexConfigOverride || !got.LaunchPlan.MCPAttachmentVerified {
+		t.Fatalf("expected verified codex launch plan, got %+v", got)
+	}
+	if got.AgentCapabilities.RequiresGlobalConfigMutation || len(got.LaunchPlan.MCPConfig.MCPServers) != 1 {
+		t.Fatalf("expected isolated generated mcp config, got %+v", got)
+	}
 }
 
 func TestJobRunRejectsBundleAndProfileTogether(t *testing.T) {
@@ -398,6 +406,139 @@ func TestJobRunControlledCIFailsWithoutSupportedIdentity(t *testing.T) {
 	}
 }
 
+func TestJobRunDryRunSupportsClaudeWithSharedMetadataShape(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+
+	run := func(agentName string) (jobRunOutput, map[string]json.RawMessage) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := runJob([]string{"run", "--agent", agentName, "--task", taskPath, "--dry-run"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("job run %s exit code = %d, want 0; stderr=%s", agentName, code, stderr.String())
+		}
+		var got jobRunOutput
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatalf("decode %s output: %v\n%s", agentName, err, stdout.String())
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+			t.Fatalf("decode %s raw output: %v", agentName, err)
+		}
+		return got, raw
+	}
+
+	codex, codexRaw := run("codex")
+	claude, claudeRaw := run("claude")
+	if claude.MCPWiringMethod != agentkit.MCPWiringConfigFlag || !claude.LaunchPlan.MCPAttachmentVerified {
+		t.Fatalf("expected verified claude launch plan, got %+v", claude)
+	}
+	if got := strings.Join(claude.LaunchPlan.Argv[:2], "\x00"); got != "--mcp-config\x00"+claude.LaunchPlan.MCPConfigPath {
+		t.Fatalf("unexpected claude launch argv: %+v", claude.LaunchPlan.Argv)
+	}
+	if !sameJSONKeys(codexRaw, claudeRaw) {
+		t.Fatalf("codex and claude job metadata keys differ: codex=%v claude=%v", mapKeys(codexRaw), mapKeys(claudeRaw))
+	}
+	if codex.Profile != claude.Profile || codex.PolicyBundleHash != claude.PolicyBundleHash || codex.Task != claude.Task || codex.Workspace != claude.Workspace {
+		t.Fatalf("shared job metadata diverged: codex=%+v claude=%+v", codex, claude)
+	}
+}
+
+func TestJobRunDryRunOutputIsDeterministic(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	run := func() string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := runJob([]string{"run", "--agent", "codex", "--task", taskPath, "--dry-run"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		return stdout.String()
+	}
+	if first, second := run(), run(); first != second {
+		t.Fatalf("dry-run output changed across identical runs:\nfirst=%s\nsecond=%s", first, second)
+	}
+}
+
+func TestJobRunNoLaunchRecordsAgentVersionWhenAvailable(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := t.TempDir()
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	original := discoverJobAgentVersion
+	discoverJobAgentVersion = func(agentkit.Builder) string { return "codex 0.130.0" }
+	t.Cleanup(func() { discoverJobAgentVersion = original })
+
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task", taskPath, "--workspace", workspace, "--no-launch"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if got.AgentVersion != "codex 0.130.0" {
+		t.Fatalf("expected discovered agent version, got %+v", got)
+	}
+	if _, err := os.Stat(got.LaunchPlan.MCPConfigPath); err != nil {
+		t.Fatalf("expected no-launch to materialize generated mcp config: %v", err)
+	}
+}
+
+func TestJobRunRealLaunchUsesVerifiedAgentPlan(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := t.TempDir()
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+
+	for _, agentName := range []string{"codex", "claude"} {
+		t.Run(agentName, func(t *testing.T) {
+			originalLaunch := launchJobAgent
+			originalDiscover := discoverJobAgentVersion
+			var launched agentkit.LaunchPlan
+			launchJobAgent = func(plan agentkit.LaunchPlan, stdout, stderr io.Writer) error {
+				launched = plan
+				return nil
+			}
+			discoverJobAgentVersion = func(agentkit.Builder) string { return agentName + " version" }
+			t.Cleanup(func() {
+				launchJobAgent = originalLaunch
+				discoverJobAgentVersion = originalDiscover
+			})
+
+			var stdout, stderr bytes.Buffer
+			code := runJob([]string{"run", "--agent", agentName, "--task", taskPath, "--workspace", workspace}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			if !launched.MCPAttachmentVerified || len(launched.MCPConfig.MCPServers) != 1 || launched.MCPConfig.MCPServers["prodclaw"].Command != "prodclaw" {
+				t.Fatalf("unexpected launched plan: %+v", launched)
+			}
+			if _, err := os.Stat(launched.MCPConfigPath); err != nil {
+				t.Fatalf("expected real launch to materialize generated mcp config: %v", err)
+			}
+			switch agentName {
+			case "codex":
+				if launched.MCPWiringMethod != agentkit.MCPWiringCodexConfigOverride || !strings.Contains(strings.Join(launched.Argv, "\x00"), "mcp_servers.prodclaw.command") {
+					t.Fatalf("unexpected codex launch plan: %+v", launched)
+				}
+			case "claude":
+				if launched.MCPWiringMethod != agentkit.MCPWiringConfigFlag || len(launched.Argv) < 2 || launched.Argv[0] != "--mcp-config" || launched.Argv[1] != launched.MCPConfigPath {
+					t.Fatalf("unexpected claude launch plan: %+v", launched)
+				}
+			}
+		})
+	}
+}
+
 func writePolicyFixture(t *testing.T, decision string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -475,6 +616,26 @@ rules:
 		t.Fatalf("write action: %v", err)
 	}
 	return base, env, actionPath
+}
+
+func sameJSONKeys(a, b map[string]json.RawMessage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key := range a {
+		if _, ok := b[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mapKeys(values map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func escapeJSONPath(path string) string {
