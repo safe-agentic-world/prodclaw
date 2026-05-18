@@ -11,15 +11,35 @@ import (
 )
 
 type Values struct {
-	PolicyBundle string `json:"policy_bundle,omitempty"`
-	Profile      string `json:"profile,omitempty"`
-	Workspace    string `json:"workspace,omitempty"`
-	AuditPath    string `json:"audit,omitempty"`
-	Principal    string `json:"principal,omitempty"`
-	Agent        string `json:"agent,omitempty"`
-	Environment  string `json:"environment,omitempty"`
-	TaskPath     string `json:"task,omitempty"`
-	ControlledCI bool   `json:"controlled_ci,omitempty"`
+	PolicyBundle string       `json:"policy_bundle,omitempty"`
+	PolicyInputs PolicyInputs `json:"policy_inputs,omitempty"`
+	Profile      string       `json:"profile,omitempty"`
+	Workspace    string       `json:"workspace,omitempty"`
+	AuditPath    string       `json:"audit,omitempty"`
+	Principal    string       `json:"principal,omitempty"`
+	Agent        string       `json:"agent,omitempty"`
+	Environment  string       `json:"environment,omitempty"`
+	TaskPath     string       `json:"task,omitempty"`
+	ControlledCI bool         `json:"controlled_ci,omitempty"`
+}
+
+type PolicyInput struct {
+	Path   string `json:"path,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+type PolicyInputs struct {
+	Baseline     PolicyInput `json:"baseline,omitempty"`
+	Organization PolicyInput `json:"organization,omitempty"`
+	Repository   PolicyInput `json:"repository,omitempty"`
+	Environment  PolicyInput `json:"environment,omitempty"`
+	Job          PolicyInput `json:"job,omitempty"`
+}
+
+type OrderedPolicyInput struct {
+	Role   string
+	Path   string
+	SHA256 string
 }
 
 type LookupEnv func(string) (string, bool)
@@ -64,6 +84,16 @@ func (v *Values) applyEnv(lookupEnv LookupEnv) {
 		}
 	}
 	apply(&v.PolicyBundle, "PRODCLAW_POLICY_BUNDLE")
+	apply(&v.PolicyInputs.Baseline.Path, "PRODCLAW_POLICY_BASELINE")
+	apply(&v.PolicyInputs.Organization.Path, "PRODCLAW_POLICY_ORGANIZATION")
+	apply(&v.PolicyInputs.Repository.Path, "PRODCLAW_POLICY_REPOSITORY")
+	apply(&v.PolicyInputs.Environment.Path, "PRODCLAW_POLICY_ENVIRONMENT")
+	apply(&v.PolicyInputs.Job.Path, "PRODCLAW_POLICY_JOB")
+	apply(&v.PolicyInputs.Baseline.SHA256, "PRODCLAW_POLICY_BASELINE_SHA256")
+	apply(&v.PolicyInputs.Organization.SHA256, "PRODCLAW_POLICY_ORGANIZATION_SHA256")
+	apply(&v.PolicyInputs.Repository.SHA256, "PRODCLAW_POLICY_REPOSITORY_SHA256")
+	apply(&v.PolicyInputs.Environment.SHA256, "PRODCLAW_POLICY_ENVIRONMENT_SHA256")
+	apply(&v.PolicyInputs.Job.SHA256, "PRODCLAW_POLICY_JOB_SHA256")
 	apply(&v.Profile, "PRODCLAW_PROFILE")
 	apply(&v.Workspace, "PRODCLAW_WORKSPACE")
 	apply(&v.AuditPath, "PRODCLAW_AUDIT")
@@ -73,6 +103,25 @@ func (v *Values) applyEnv(lookupEnv LookupEnv) {
 	apply(&v.TaskPath, "PRODCLAW_TASK")
 	if value, ok := lookupEnv("PRODCLAW_CONTROLLED_CI"); ok {
 		v.ControlledCI = parseBool(value)
+	}
+}
+
+func (p PolicyInputs) HasAny() bool {
+	for _, input := range p.Ordered() {
+		if strings.TrimSpace(input.Path) != "" || strings.TrimSpace(input.SHA256) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (p PolicyInputs) Ordered() []OrderedPolicyInput {
+	return []OrderedPolicyInput{
+		{Role: "baseline", Path: p.Baseline.Path, SHA256: p.Baseline.SHA256},
+		{Role: "organization", Path: p.Organization.Path, SHA256: p.Organization.SHA256},
+		{Role: "repository", Path: p.Repository.Path, SHA256: p.Repository.SHA256},
+		{Role: "environment", Path: p.Environment.Path, SHA256: p.Environment.SHA256},
+		{Role: "job", Path: p.Job.Path, SHA256: p.Job.SHA256},
 	}
 }
 

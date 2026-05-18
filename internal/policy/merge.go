@@ -58,6 +58,10 @@ func LoadBundlesWithOptions(paths []string, options MultiLoadOptions) (Bundle, e
 			Role:              role,
 			SignatureVerified: options.VerifySignatures,
 		}}
+		for idx := range bundle.Rules {
+			bundle.Rules[idx].SourcePath = normalized[0]
+			bundle.Rules[idx].SourceHash = bundle.Hash
+		}
 		return bundle, nil
 	}
 	if options.VerifySignatures && len(options.SignaturePaths) != len(normalized) {

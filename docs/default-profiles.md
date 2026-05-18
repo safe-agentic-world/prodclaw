@@ -12,10 +12,11 @@ The embedded profiles are useful for evaluation and safe defaults, but productio
 ```bash
 prodclaw profiles list
 prodclaw profiles show ci-strict
+prodclaw profiles verify
 prodclaw job run --agent codex --task task.md --dry-run
 ```
 
-`job run --dry-run` prints the selected profile and the hash computed from the profile embedded in the running binary.
+`profiles list` identifies the embedded source and hash shipped in the running binary. `profiles verify` validates embedded bundles and, when the canonical `profiles/` directory is present, checks that the generated embedded bytes match the canonical YAML. `job run --dry-run` prints the selected profile and the effective policy hash used for execution.
 
 ## Replace A Built-In Profile
 
@@ -32,6 +33,8 @@ prodclaw job run \
 Customer bundles should encode explicit allow and deny rules for the actual CI job. If a required action is denied, update the policy deliberately; do not add human approval workflows to CI as a bypass.
 
 ProdClaw intentionally has no manual profile-hash pin file. Profile and bundle hashes are computed from the bytes loaded by the running binary or the customer bundle path.
+
+The canonical built-in policy sources live in `profiles/*.yaml`. Run `go generate ./profiles` after editing them; CI fails if the generated embedded copies drift from the canonical files.
 
 ## Network Defaults
 

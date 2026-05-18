@@ -11,23 +11,26 @@ import (
 	runtimeconfig "github.com/safe-agentic-world/prodclaw/internal/config"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/logging"
+	"github.com/safe-agentic-world/prodclaw/internal/policy"
 )
 
 type jobRunOutput struct {
-	Mode               string                             `json:"mode"`
-	Agent              string                             `json:"agent"`
-	Task               string                             `json:"task"`
-	Workspace          string                             `json:"workspace"`
-	Profile            string                             `json:"profile,omitempty"`
-	PolicyBundle       string                             `json:"policy_bundle,omitempty"`
-	PolicyBundleHash   string                             `json:"policy_bundle_hash"`
-	PolicySource       string                             `json:"policy_source"`
-	LaunchPlanned      bool                               `json:"launch_planned"`
-	ControlledCI       bool                               `json:"controlled_ci"`
-	Principal          string                             `json:"principal"`
-	Environment        string                             `json:"environment"`
-	CIIdentity         identity.CIIdentity                `json:"ci_identity,omitempty"`
-	CredentialExposure identity.CredentialExposureSummary `json:"credential_exposure,omitempty"`
+	Mode                string                             `json:"mode"`
+	Agent               string                             `json:"agent"`
+	Task                string                             `json:"task"`
+	Workspace           string                             `json:"workspace"`
+	Profile             string                             `json:"profile,omitempty"`
+	PolicyBundle        string                             `json:"policy_bundle,omitempty"`
+	PolicyBundleHash    string                             `json:"policy_bundle_hash"`
+	PolicySource        string                             `json:"policy_source"`
+	PolicyBundleSources []string                           `json:"policy_bundle_sources,omitempty"`
+	PolicyBundleInputs  []policy.BundleSource              `json:"policy_bundle_inputs,omitempty"`
+	LaunchPlanned       bool                               `json:"launch_planned"`
+	ControlledCI        bool                               `json:"controlled_ci"`
+	Principal           string                             `json:"principal"`
+	Environment         string                             `json:"environment"`
+	CIIdentity          identity.CIIdentity                `json:"ci_identity,omitempty"`
+	CredentialExposure  identity.CredentialExposureSummary `json:"credential_exposure,omitempty"`
 }
 
 func runJob(args []string, stdout, stderr io.Writer) int {
@@ -48,7 +51,7 @@ func runJob(args []string, stdout, stderr io.Writer) int {
 
 func printJobHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  prodclaw job run --agent codex|claude --task <path> [--config <path>] [--profile <name> | --policy-bundle <path>] --dry-run")
+	fmt.Fprintln(w, "  prodclaw job run --agent codex|claude --task <path> [--config <path>] [--profile <name> | --policy-bundle <path> | layered policy flags] --dry-run")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "notes:")
 	fmt.Fprintln(w, "  - defaults to the embedded ci-strict profile when no policy is provided")
@@ -67,6 +70,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	var dryRun bool
 	var noLaunch bool
 	var controlledCI bool
+	var policyInputFlags policyInputFlagValues
 	fs.StringVar(&configPath, "config", "", "json config path")
 	fs.StringVar(&agent, "agent", "", "agent adapter: codex|claude")
 	fs.StringVar(&taskPath, "task", "", "task file path")
@@ -74,6 +78,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&bundlePath, "bundle", "", "policy bundle path")
 	fs.StringVar(&bundlePath, "policy-bundle", "", "policy bundle path")
 	fs.StringVar(&profileName, "profile", "", "built-in profile name")
+	bindPolicyInputFlags(fs, &policyInputFlags)
 	fs.BoolVar(&dryRun, "dry-run", false, "print launch plan without starting the agent")
 	fs.BoolVar(&noLaunch, "no-launch", false, "prepare launch plan without starting the agent")
 	fs.BoolVar(&controlledCI, "controlled-ci", false, "fail closed unless supported CI identity is complete")
@@ -90,7 +95,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "job run: load config: %v\n", err)
 		return 30
 	}
-	overlayJobFlags(fs, &cfg, agent, taskPath, workspace, bundlePath, profileName, controlledCI)
+	overlayJobFlags(fs, &cfg, agent, taskPath, workspace, bundlePath, profileName, controlledCI, policyInputFlags)
 	agent = cfg.Agent
 	taskPath = cfg.TaskPath
 	workspace = defaultString(cfg.Workspace, ".")
@@ -119,14 +124,10 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "job run: real agent launch is not implemented yet; use --dry-run or --no-launch")
 		return 20
 	}
-	if bundlePath != "" && profileName != "" {
-		fmt.Fprintln(stderr, "job run: --policy-bundle and --profile are mutually exclusive")
-		return 30
-	}
-	if bundlePath == "" && profileName == "" {
+	if bundlePath == "" && profileName == "" && !cfg.PolicyInputs.HasAny() {
 		profileName = "ci-strict"
 	}
-	bundle, err := loadPolicyBundle(policyEvalOptions{BundlePath: bundlePath, ProfileName: profileName})
+	selection, err := loadSelectedPolicy(policyLoadRequest{BundlePath: bundlePath, ProfileName: profileName, PolicyInputs: cfg.PolicyInputs})
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: load bundle: %v\n", err)
 		return 30
@@ -153,20 +154,22 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		return 40
 	}
 	output := jobRunOutput{
-		Mode:               selectJobRunMode(dryRun),
-		Agent:              verifiedIdentity.Agent,
-		Task:               taskAbs,
-		Workspace:          workspaceAbs,
-		Profile:            profileName,
-		PolicyBundle:       bundlePath,
-		PolicyBundleHash:   bundle.Hash,
-		PolicySource:       selectPolicySource(profileName),
-		LaunchPlanned:      false,
-		ControlledCI:       cfg.ControlledCI,
-		Principal:          verifiedIdentity.Principal,
-		Environment:        verifiedIdentity.Environment,
-		CIIdentity:         verifiedIdentity.CI,
-		CredentialExposure: verifiedIdentity.CredentialExposure,
+		Mode:                selectJobRunMode(dryRun),
+		Agent:               verifiedIdentity.Agent,
+		Task:                taskAbs,
+		Workspace:           workspaceAbs,
+		Profile:             selection.ProfileName,
+		PolicyBundle:        selection.BundlePath,
+		PolicyBundleHash:    selection.Bundle.Hash,
+		PolicySource:        selection.Source,
+		PolicyBundleSources: policy.BundleSourceLabels(selection.Bundle),
+		PolicyBundleInputs:  append([]policy.BundleSource{}, selection.Bundle.SourceBundles...),
+		LaunchPlanned:       false,
+		ControlledCI:        cfg.ControlledCI,
+		Principal:           verifiedIdentity.Principal,
+		Environment:         verifiedIdentity.Environment,
+		CIIdentity:          verifiedIdentity.CI,
+		CredentialExposure:  verifiedIdentity.CredentialExposure,
 	}
 	_ = logging.New(stderr).Info("job.plan", map[string]any{
 		"agent":         output.Agent,
@@ -185,7 +188,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, workspace, bundlePath, profileName string, controlledCI bool) {
+func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, workspace, bundlePath, profileName string, controlledCI bool, policyInputFlags policyInputFlagValues) {
 	if flagWasSet(fs, "agent") {
 		cfg.Agent = agent
 	}
@@ -201,6 +204,7 @@ func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPat
 	if flagWasSet(fs, "profile") {
 		cfg.Profile = profileName
 	}
+	overlayPolicyInputFlags(fs, &cfg.PolicyInputs, policyInputFlags)
 	if flagWasSet(fs, "controlled-ci") {
 		cfg.ControlledCI = controlledCI
 	}
@@ -211,11 +215,4 @@ func selectJobRunMode(dryRun bool) string {
 		return "dry_run"
 	}
 	return "no_launch"
-}
-
-func selectPolicySource(profileName string) string {
-	if profileName != "" {
-		return "embedded_profile"
-	}
-	return "bundle"
 }

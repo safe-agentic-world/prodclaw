@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/safe-agentic-world/prodclaw/internal/policy"
 )
 
 func TestRunVersion(t *testing.T) {
@@ -28,8 +30,9 @@ func TestProfilesListShowsBuiltInProfiles(t *testing.T) {
 		t.Fatalf("profiles list exit code = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var records []struct {
-		Name string `json:"name"`
-		Hash string `json:"hash"`
+		Name   string `json:"name"`
+		Source string `json:"source"`
+		Hash   string `json:"hash"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &records); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, stdout.String())
@@ -37,7 +40,7 @@ func TestProfilesListShowsBuiltInProfiles(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("profile count = %d, want 2: %+v", len(records), records)
 	}
-	if records[0].Name != "ci-standard" || records[0].Hash == "" {
+	if records[0].Name != "ci-standard" || records[0].Source != "embedded" || records[0].Hash == "" {
 		t.Fatalf("unexpected first profile: %+v", records[0])
 	}
 }
@@ -50,6 +53,32 @@ func TestProfilesShowReturnsYAML(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "version: v1") || !strings.Contains(stdout.String(), "ci-standard-deny-protected-branch-push") {
 		t.Fatalf("unexpected profile yaml:\n%s", stdout.String())
+	}
+}
+
+func TestProfilesVerifyReportsEmbeddedAndCanonicalState(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runProfiles([]string{"verify", "--format", "json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("profiles verify exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var records []struct {
+		Name             string `json:"name"`
+		Source           string `json:"source"`
+		EmbeddedValid    bool   `json:"embedded_valid"`
+		CanonicalPresent bool   `json:"canonical_present"`
+		CanonicalMatches bool   `json:"canonical_matches"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &records); err != nil {
+		t.Fatalf("decode verify output: %v\n%s", err, stdout.String())
+	}
+	if len(records) != 2 {
+		t.Fatalf("verify record count = %d, want 2", len(records))
+	}
+	for _, record := range records {
+		if record.Source != "embedded" || !record.EmbeddedValid || !record.CanonicalPresent || !record.CanonicalMatches {
+			t.Fatalf("unexpected verify record: %+v", record)
+		}
 	}
 }
 
@@ -97,7 +126,7 @@ func TestPolicyCheckMissingBundleFailsClosed(t *testing.T) {
 	if code != 30 {
 		t.Fatalf("policy check exit code = %d, want 30", code)
 	}
-	if !strings.Contains(stderr.String(), "--bundle or --profile is required") {
+	if !strings.Contains(stderr.String(), "--bundle, --profile, or layered policy inputs are required") {
 		t.Fatalf("expected bundle error, got %q", stderr.String())
 	}
 }
@@ -144,6 +173,56 @@ func TestPolicyCheckRejectsBundleAndProfileTogether(t *testing.T) {
 	}
 }
 
+func TestPolicyExplainIncludesLayeredPolicyProvenance(t *testing.T) {
+	base, env, actionPath := writeLayeredPolicyFixture(t)
+	var stdout, stderr bytes.Buffer
+	code := runPolicy([]string{
+		"explain",
+		"--policy-baseline", base,
+		"--policy-environment", env,
+		"--action", actionPath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("policy explain exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got policyExplainOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if got.Decision != "DENY" || got.PolicySource != "layered_bundles" || len(got.PolicyBundleInputs) != 2 {
+		t.Fatalf("unexpected layered policy output: %+v", got)
+	}
+	if got.PolicyBundleInputs[0].Role != "baseline" || got.PolicyBundleInputs[1].Role != "environment" {
+		t.Fatalf("unexpected policy input order: %+v", got.PolicyBundleInputs)
+	}
+	if len(got.MatchedRuleProvenance) != 2 || got.MatchedRuleProvenance[0].BundleSource == "" || got.MatchedRuleProvenance[1].BundleSource == "" {
+		t.Fatalf("expected matched source bundle provenance, got %+v", got.MatchedRuleProvenance)
+	}
+}
+
+func TestPolicyRejectsAmbiguousLayeredSelectionAndInvalidHash(t *testing.T) {
+	bundle, actionPath := writePolicyFixture(t, "ALLOW")
+	var stdout, stderr bytes.Buffer
+	code := runPolicy([]string{"check", "--bundle", bundle, "--policy-baseline", bundle, "--action", actionPath}, &stdout, &stderr)
+	if code != 30 || !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("expected ambiguous policy failure, code=%d stderr=%q", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runPolicy([]string{"check", "--policy-baseline", bundle, "--policy-baseline-sha256", "not-a-hash", "--action", actionPath}, &stdout, &stderr)
+	if code != 30 || !strings.Contains(stderr.String(), "invalid sha256") {
+		t.Fatalf("expected invalid hash failure, code=%d stderr=%q", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runPolicy([]string{"check", "--policy-baseline", bundle, "--policy-baseline-sha256", strings.Repeat("0", 64), "--action", actionPath}, &stdout, &stderr)
+	if code != 30 || !strings.Contains(stderr.String(), "hash mismatch") {
+		t.Fatalf("expected hash mismatch failure, code=%d stderr=%q", code, stderr.String())
+	}
+}
+
 func TestJobRunDryRunDefaultsToCIStrictProfile(t *testing.T) {
 	taskPath := filepath.Join(t.TempDir(), "task.md")
 	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
@@ -179,6 +258,61 @@ func TestJobRunRejectsBundleAndProfileTogether(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "mutually exclusive") {
 		t.Fatalf("expected mutual exclusion error, got %q", stderr.String())
+	}
+}
+
+func TestJobRunSingleBundleRemainsExplicitCustomerPolicy(t *testing.T) {
+	bundle, _ := writePolicyFixture(t, "ALLOW")
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task", taskPath, "--dry-run", "--bundle", bundle}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if got.Profile != "" || got.PolicySource != "customer_bundle" || len(got.PolicyBundleInputs) != 1 || got.PolicyBundleInputs[0].Path != bundle {
+		t.Fatalf("single bundle should not inherit defaults: %+v", got)
+	}
+}
+
+func TestJobRunLayeredPolicyMetadata(t *testing.T) {
+	base, env, _ := writeLayeredPolicyFixture(t)
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	baseBundle, err := policy.LoadBundle(base)
+	if err != nil {
+		t.Fatalf("load base bundle: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{
+		"run",
+		"--agent", "codex",
+		"--task", taskPath,
+		"--dry-run",
+		"--policy-baseline", base,
+		"--policy-baseline-sha256", baseBundle.Hash,
+		"--policy-environment", env,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if got.PolicySource != "layered_bundles" || len(got.PolicyBundleInputs) != 2 || len(got.PolicyBundleSources) != 2 {
+		t.Fatalf("unexpected layered job metadata: %+v", got)
+	}
+	if got.PolicyBundleInputs[0].Role != "baseline" || got.PolicyBundleInputs[1].Role != "environment" || got.PolicyBundleHash == "" {
+		t.Fatalf("unexpected layered input ordering: %+v", got.PolicyBundleInputs)
 	}
 }
 
@@ -303,6 +437,44 @@ rules:
 		t.Fatalf("write action: %v", err)
 	}
 	return bundle, actionFile
+}
+
+func writeLayeredPolicyFixture(t *testing.T) (string, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yaml")
+	env := filepath.Join(dir, "env.yaml")
+	actionPath := filepath.Join(dir, "action.json")
+	if err := os.WriteFile(base, []byte(`version: v1
+rules:
+  - id: allow-workspace-read
+    action_type: fs.read
+    resource: file://workspace/**
+    decision: ALLOW
+`), 0o600); err != nil {
+		t.Fatalf("write base bundle: %v", err)
+	}
+	if err := os.WriteFile(env, []byte(`version: v1
+rules:
+  - id: deny-dotenv
+    action_type: fs.read
+    resource: file://workspace/.env
+    decision: DENY
+`), 0o600); err != nil {
+		t.Fatalf("write env bundle: %v", err)
+	}
+	if err := os.WriteFile(actionPath, []byte(`{
+  "schema_version": "v1",
+  "action_id": "act-1",
+  "action_type": "fs.read",
+  "resource": "file://workspace/.env",
+  "params": {},
+  "trace_id": "trace-1",
+  "context": {"extensions": {}}
+}`), 0o600); err != nil {
+		t.Fatalf("write action: %v", err)
+	}
+	return base, env, actionPath
 }
 
 func escapeJSONPath(path string) string {

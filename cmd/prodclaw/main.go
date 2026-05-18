@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/safe-agentic-world/prodclaw/internal/action"
@@ -73,10 +74,12 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var principal string
 	var agent string
 	var environment string
+	var policyInputFlags policyInputFlagValues
 	fs.StringVar(&configPath, "config", "", "json config path")
 	fs.StringVar(&bundlePath, "bundle", "", "policy bundle path")
 	fs.StringVar(&bundlePath, "policy-bundle", "", "policy bundle path")
 	fs.StringVar(&profileName, "profile", "", "built-in profile name")
+	bindPolicyInputFlags(fs, &policyInputFlags)
 	fs.StringVar(&workspace, "workspace", ".", "workspace root")
 	fs.StringVar(&auditPath, "audit", "", "audit jsonl path")
 	fs.StringVar(&principal, "principal", "system", "verified principal")
@@ -90,7 +93,7 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "mcp: load config: %v\n", err)
 		return 30
 	}
-	overlayMCPFlags(fs, &cfg, bundlePath, profileName, workspace, auditPath, principal, agent, environment)
+	overlayMCPFlags(fs, &cfg, bundlePath, profileName, workspace, auditPath, principal, agent, environment, policyInputFlags)
 	bundlePath = cfg.PolicyBundle
 	profileName = cfg.Profile
 	workspace = defaultString(cfg.Workspace, ".")
@@ -98,16 +101,16 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	principal = defaultString(cfg.Principal, "system")
 	agent = defaultString(cfg.Agent, "prodclaw")
 	environment = defaultString(cfg.Environment, "ci")
-	if bundlePath == "" && profileName == "" {
+	if bundlePath == "" && profileName == "" && !cfg.PolicyInputs.HasAny() {
 		profileName = "ci-standard"
 	}
-	bundle, err := loadPolicyBundle(policyEvalOptions{BundlePath: bundlePath, ProfileName: profileName})
+	selection, err := loadSelectedPolicy(policyLoadRequest{BundlePath: bundlePath, ProfileName: profileName, PolicyInputs: cfg.PolicyInputs})
 	if err != nil {
 		fmt.Fprintf(stderr, "mcp: load bundle: %v\n", err)
 		return 30
 	}
 	server, err := mcp.NewServer(mcp.Options{
-		Bundle:    bundle,
+		Bundle:    selection.Bundle,
 		Workspace: workspace,
 		AuditPath: auditPath,
 		Identity: identity.VerifiedIdentity{
@@ -133,13 +136,14 @@ func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func overlayMCPFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, bundlePath, profileName, workspace, auditPath, principal, agent, environment string) {
+func overlayMCPFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, bundlePath, profileName, workspace, auditPath, principal, agent, environment string, policyInputFlags policyInputFlagValues) {
 	if flagWasSet(fs, "bundle") || flagWasSet(fs, "policy-bundle") {
 		cfg.PolicyBundle = bundlePath
 	}
 	if flagWasSet(fs, "profile") {
 		cfg.Profile = profileName
 	}
+	overlayPolicyInputFlags(fs, &cfg.PolicyInputs, policyInputFlags)
 	if flagWasSet(fs, "workspace") {
 		cfg.Workspace = workspace
 	}
@@ -171,8 +175,10 @@ func runProfiles(args []string, stdout, stderr io.Writer) int {
 		err = executeProfilesList(args[1:], stdout, stderr)
 	case "show":
 		err = executeProfilesShow(args[1:], stdout, stderr)
+	case "verify":
+		err = executeProfilesVerify(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintln(stderr, "profiles command required: list|show")
+		fmt.Fprintln(stderr, "profiles command required: list|show|verify")
 		printProfilesHelp(stderr)
 		return 2
 	}
@@ -187,6 +193,7 @@ func printProfilesHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  prodclaw profiles list [--format text|json]")
 	fmt.Fprintln(w, "  prodclaw profiles show <name> [--format yaml|json]")
+	fmt.Fprintln(w, "  prodclaw profiles verify [--format text|json]")
 }
 
 func executeProfilesList(args []string, stdout, stderr io.Writer) error {
@@ -203,7 +210,7 @@ func executeProfilesList(args []string, stdout, stderr io.Writer) error {
 	switch strings.ToLower(strings.TrimSpace(*format)) {
 	case "", "text":
 		for _, record := range records {
-			if _, err := fmt.Fprintf(stdout, "%-12s %s  %s\n", record.Name, record.Hash, record.Summary); err != nil {
+			if _, err := fmt.Fprintf(stdout, "%-12s %-8s %s  %s\n", record.Name, record.Source, record.Hash, record.Summary); err != nil {
 				return err
 			}
 		}
@@ -212,6 +219,83 @@ func executeProfilesList(args []string, stdout, stderr io.Writer) error {
 		return writeJSON(stdout, records)
 	default:
 		return fmt.Errorf("--format must be text or json")
+	}
+}
+
+func profilesVerificationFailed(records []profiles.VerifyRecord) bool {
+	for _, record := range records {
+		if !record.EmbeddedValid || record.Error != "" || (record.CanonicalPresent && !record.CanonicalMatches) {
+			return true
+		}
+	}
+	return false
+}
+
+func executeProfilesVerify(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("profiles verify", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	format := fs.String("format", "text", "output format: text|json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	records := profiles.Verify(findCanonicalProfilesDir())
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "text":
+		for _, record := range records {
+			status := "OK"
+			if !record.EmbeddedValid || record.Error != "" || (record.CanonicalPresent && !record.CanonicalMatches) {
+				status = "FAIL"
+			}
+			if _, err := fmt.Fprintf(stdout, "%-12s %-4s source=%s embedded=%s", record.Name, status, record.Source, record.EmbeddedHash); err != nil {
+				return err
+			}
+			if record.CanonicalPresent {
+				if _, err := fmt.Fprintf(stdout, " canonical=%s matches=%t", record.CanonicalHash, record.CanonicalMatches); err != nil {
+					return err
+				}
+			}
+			if record.Error != "" {
+				if _, err := fmt.Fprintf(stdout, " error=%q", record.Error); err != nil {
+					return err
+				}
+			}
+			if _, err := fmt.Fprintln(stdout); err != nil {
+				return err
+			}
+		}
+		for _, record := range records {
+			if !record.EmbeddedValid || record.Error != "" || (record.CanonicalPresent && !record.CanonicalMatches) {
+				return fmt.Errorf("profile verification failed")
+			}
+		}
+		return nil
+	case "json":
+		if err := writeJSON(stdout, records); err != nil {
+			return err
+		}
+		if profilesVerificationFailed(records) {
+			return fmt.Errorf("profile verification failed")
+		}
+		return nil
+	default:
+		return fmt.Errorf("--format must be text or json")
+	}
+}
+
+func findCanonicalProfilesDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "profiles"
+	}
+	for dir := cwd; ; dir = filepath.Dir(dir) {
+		candidate := filepath.Join(dir, "profiles")
+		if _, err := os.Stat(filepath.Join(candidate, "ci-standard.yaml")); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "profiles"
+		}
 	}
 }
 
@@ -262,8 +346,8 @@ func runPolicy(args []string, stdout, stderr io.Writer) int {
 
 func printPolicyHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  prodclaw policy check (--profile <name> | --bundle <path>) --action <path> [identity flags]")
-	fmt.Fprintln(w, "  prodclaw policy explain (--profile <name> | --bundle <path>) --action <path> [identity flags]")
+	fmt.Fprintln(w, "  prodclaw policy check (--profile <name> | --bundle <path> | layered policy flags) --action <path> [identity flags]")
+	fmt.Fprintln(w, "  prodclaw policy explain (--profile <name> | --bundle <path> | layered policy flags) --action <path> [identity flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "built-in profiles: %s\n", strings.Join(profiles.Names(), ", "))
 	fmt.Fprintln(w)
@@ -271,6 +355,13 @@ func printPolicyHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --principal <name>     default system")
 	fmt.Fprintln(w, "  --agent <name>         default prodclaw")
 	fmt.Fprintln(w, "  --environment <name>   default ci")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "layered policy flags:")
+	fmt.Fprintln(w, "  --policy-baseline <path>")
+	fmt.Fprintln(w, "  --policy-organization <path>")
+	fmt.Fprintln(w, "  --policy-repository <path>")
+	fmt.Fprintln(w, "  --policy-environment <path>")
+	fmt.Fprintln(w, "  --policy-job <path>")
 }
 
 func runPolicyDecision(args []string, stdout, stderr io.Writer, explain bool) int {
@@ -282,9 +373,11 @@ func runPolicyDecision(args []string, stdout, stderr io.Writer, explain bool) in
 	var principal string
 	var agent string
 	var environment string
+	var policyInputFlags policyInputFlagValues
 	fs.StringVar(&bundlePath, "bundle", "", "policy bundle path")
 	fs.StringVar(&bundlePath, "policy-bundle", "", "policy bundle path")
 	fs.StringVar(&profileName, "profile", "", "built-in profile name")
+	bindPolicyInputFlags(fs, &policyInputFlags)
 	fs.StringVar(&actionPath, "action", "", "action json path")
 	fs.StringVar(&principal, "principal", "system", "verified principal")
 	fs.StringVar(&agent, "agent", "prodclaw", "verified agent")
@@ -296,6 +389,13 @@ func runPolicyDecision(args []string, stdout, stderr io.Writer, explain bool) in
 	result, err := evaluatePolicy(policyEvalOptions{
 		BundlePath:  bundlePath,
 		ProfileName: profileName,
+		PolicyInputs: runtimeconfig.PolicyInputs{
+			Baseline:     runtimeconfig.PolicyInput{Path: policyInputFlags.BaselinePath, SHA256: policyInputFlags.BaselineHash},
+			Organization: runtimeconfig.PolicyInput{Path: policyInputFlags.OrganizationPath, SHA256: policyInputFlags.OrganizationHash},
+			Repository:   runtimeconfig.PolicyInput{Path: policyInputFlags.RepositoryPath, SHA256: policyInputFlags.RepositoryHash},
+			Environment:  runtimeconfig.PolicyInput{Path: policyInputFlags.EnvironmentPath, SHA256: policyInputFlags.EnvironmentHash},
+			Job:          runtimeconfig.PolicyInput{Path: policyInputFlags.JobPath, SHA256: policyInputFlags.JobHash},
+		},
 		ActionPath:  actionPath,
 		Principal:   principal,
 		Agent:       agent,
@@ -314,21 +414,26 @@ func runPolicyDecision(args []string, stdout, stderr io.Writer, explain bool) in
 }
 
 type policyEvalOptions struct {
-	BundlePath  string
-	ProfileName string
-	ActionPath  string
-	Principal   string
-	Agent       string
-	Environment string
-	Explain     bool
+	BundlePath   string
+	ProfileName  string
+	PolicyInputs runtimeconfig.PolicyInputs
+	ActionPath   string
+	Principal    string
+	Agent        string
+	Environment  string
+	Explain      bool
 }
 
 type policyCheckOutput struct {
-	Decision         string         `json:"decision"`
-	ReasonCode       string         `json:"reason_code"`
-	MatchedRuleIDs   []string       `json:"matched_rule_ids"`
-	PolicyBundleHash string         `json:"policy_bundle_hash"`
-	Obligations      map[string]any `json:"obligations,omitempty"`
+	Decision            string                `json:"decision"`
+	ReasonCode          string                `json:"reason_code"`
+	MatchedRuleIDs      []string              `json:"matched_rule_ids"`
+	PolicyBundleHash    string                `json:"policy_bundle_hash"`
+	PolicyBundleSources []string              `json:"policy_bundle_sources,omitempty"`
+	PolicyBundleInputs  []policy.BundleSource `json:"policy_bundle_inputs,omitempty"`
+	PolicySource        string                `json:"policy_source"`
+	Profile             string                `json:"profile,omitempty"`
+	Obligations         map[string]any        `json:"obligations,omitempty"`
 }
 
 type policyExplainOutput struct {
@@ -341,16 +446,14 @@ type policyExplainOutput struct {
 }
 
 func evaluatePolicy(opts policyEvalOptions) (any, error) {
-	if opts.BundlePath != "" && opts.ProfileName != "" {
-		return nil, fmt.Errorf("--bundle and --profile are mutually exclusive")
-	}
-	if opts.BundlePath == "" && opts.ProfileName == "" {
-		return nil, fmt.Errorf("--bundle or --profile is required")
-	}
 	if opts.ActionPath == "" {
 		return nil, fmt.Errorf("--action is required")
 	}
-	bundle, err := loadPolicyBundle(opts)
+	selection, err := loadSelectedPolicy(policyLoadRequest{
+		BundlePath:   opts.BundlePath,
+		ProfileName:  opts.ProfileName,
+		PolicyInputs: opts.PolicyInputs,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("load bundle: %w", err)
 	}
@@ -375,13 +478,17 @@ func evaluatePolicy(opts policyEvalOptions) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("normalize action: %w", err)
 	}
-	details := policy.NewEngine(bundle).Explain(normalized)
+	details := policy.NewEngine(selection.Bundle).Explain(normalized)
 	base := policyCheckOutput{
-		Decision:         details.Decision.Decision,
-		ReasonCode:       details.Decision.ReasonCode,
-		MatchedRuleIDs:   details.Decision.MatchedRuleIDs,
-		PolicyBundleHash: details.Decision.PolicyBundleHash,
-		Obligations:      details.Decision.Obligations,
+		Decision:            details.Decision.Decision,
+		ReasonCode:          details.Decision.ReasonCode,
+		MatchedRuleIDs:      details.Decision.MatchedRuleIDs,
+		PolicyBundleHash:    details.Decision.PolicyBundleHash,
+		PolicyBundleSources: details.Decision.PolicyBundleSources,
+		PolicyBundleInputs:  details.Decision.PolicyBundleInputs,
+		PolicySource:        selection.Source,
+		Profile:             selection.ProfileName,
+		Obligations:         details.Decision.Obligations,
 	}
 	if !opts.Explain {
 		return base, nil
@@ -394,13 +501,6 @@ func evaluatePolicy(opts policyEvalOptions) (any, error) {
 		ExecAuthorization:     details.ExecAuthorization,
 		MatchedRuleProvenance: details.MatchedRuleProvenance,
 	}, nil
-}
-
-func loadPolicyBundle(opts policyEvalOptions) (policy.Bundle, error) {
-	if opts.ProfileName != "" {
-		return profiles.Load(opts.ProfileName)
-	}
-	return policy.LoadBundle(opts.BundlePath)
 }
 
 func writeJSON(w io.Writer, value any) error {
