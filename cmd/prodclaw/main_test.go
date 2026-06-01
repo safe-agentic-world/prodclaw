@@ -125,6 +125,9 @@ func TestPolicyExplainIncludesDenyDetails(t *testing.T) {
 	if len(got.DenyRules) != 1 || got.DenyRules[0].RuleID != "allow-git-status" {
 		t.Fatalf("unexpected deny details: %+v", got.DenyRules)
 	}
+	if got.AssuranceLevel == "" || len(got.MediationCoverage) == 0 {
+		t.Fatalf("expected assurance metadata in explain output: %+v", got)
+	}
 }
 
 func TestPolicyCheckMissingBundleFailsClosed(t *testing.T) {
@@ -256,6 +259,9 @@ func TestJobRunDryRunDefaultsToCIStrictProfile(t *testing.T) {
 	if got.AgentCapabilities.RequiresGlobalConfigMutation || len(got.LaunchPlan.MCPConfig.MCPServers) != 1 {
 		t.Fatalf("expected isolated generated mcp config, got %+v", got)
 	}
+	if got.AssuranceLevel == "" || len(got.MediationCoverage) == 0 {
+		t.Fatalf("expected assurance metadata in job output: %+v", got)
+	}
 }
 
 func TestJobRunRejectsBundleAndProfileTogether(t *testing.T) {
@@ -271,6 +277,22 @@ func TestJobRunRejectsBundleAndProfileTogether(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "mutually exclusive") {
 		t.Fatalf("expected mutual exclusion error, got %q", stderr.String())
+	}
+}
+
+func TestJobRunDetectsRawUpstreamMCPBeforeLaunch(t *testing.T) {
+	t.Setenv("PRODCLAW_RAW_MCP_SERVERS", "filesystem")
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task", taskPath, "--dry-run"}, &stdout, &stderr)
+	if code != jobkit.ExitRuntimeGuaranteeFailure {
+		t.Fatalf("job run exit code = %d, want %d; stdout=%s stderr=%s", code, jobkit.ExitRuntimeGuaranteeFailure, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "raw upstream MCP servers") {
+		t.Fatalf("expected raw MCP overlap error, got %q", stderr.String())
 	}
 }
 

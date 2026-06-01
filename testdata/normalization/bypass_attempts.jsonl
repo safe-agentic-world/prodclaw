@@ -22,3 +22,14 @@
 {"resource":"file://workspace/..","name":"bypass_file_only_parent","error_contains":"traversal"}
 {"resource":"url://example.com/..","name":"bypass_url_only_parent","error_contains":"traversal"}
 {"resource":"file://workspace/a\\\\..\\\\secret.txt","name":"bypass_file_safe_separator_mix","error_contains":"traversal"}
+{"resource":"file://workspace/C:/Users/secret.txt","name":"bypass_file_windows_drive_absolute","error_contains":"platform-specific absolute"}
+{"resource":"file://workspace/%5c%5cserver%5cshare%5csecret.txt","name":"bypass_file_unc_encoded_separators","error_contains":"encoded separators"}
+{"resource":"repo://org/repo%2Frefs%2Fheads%2Fmain","name":"bypass_repo_encoded_ref_slash","error_contains":"encoded separators"}
+{"resource":"repo://user@org/repo","name":"bypass_repo_userinfo","error_contains":"userinfo"}
+{"resource":"repo://org/repo?ref=main","name":"bypass_repo_query_ref","error_contains":"query"}
+{"resource":"repo://org/%2e%2e","name":"bypass_repo_encoded_parent","error_contains":"single segment"}
+{"resource":"url://example.com/C:%5cWindows/system32","name":"bypass_url_encoded_windows_separator","error_contains":"encoded separators"}
+{"kind":"redirect","resource":"https://user@example.com/secret","name":"bypass_redirect_userinfo","error_contains":"userinfo"}
+{"kind":"redirect","resource":"javascript:alert(1)","name":"bypass_redirect_bad_scheme","error_contains":"scheme"}
+{"kind":"redirect","resource":"https://example.com/a%2fb","name":"bypass_redirect_encoded_slash","error_contains":"encoded separators"}
+{"kind":"redirect","resource":"https://Example.com:443/a/ok?next=https://evil.example","name":"bypass_redirect_query_smuggling","normalized":"url://example.com/a/ok"}

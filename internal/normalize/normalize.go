@@ -229,12 +229,28 @@ func normalizeFileResource(parsed *url.URL) (string, error) {
 }
 
 func normalizeRepoResource(parsed *url.URL) (string, error) {
+	if parsed.User != nil {
+		return "", errors.New("repo userinfo is not allowed")
+	}
+	if parsed.RawQuery != "" {
+		return "", errors.New("repo query is not allowed")
+	}
+	if parsed.Fragment != "" {
+		return "", errors.New("repo fragment is not allowed")
+	}
 	if parsed.Host == "" {
 		return "", errors.New("repo host is required")
 	}
+	if containsEncodedSeparators(parsed.EscapedPath()) {
+		return "", errors.New("repo path encoded separators are not allowed")
+	}
+	decodedPath, err := url.PathUnescape(strings.TrimPrefix(parsed.EscapedPath(), "/"))
+	if err != nil {
+		return "", fmt.Errorf("invalid repo path encoding: %w", err)
+	}
 	org := strings.ToLower(parsed.Host)
-	repo := strings.ToLower(strings.TrimPrefix(parsed.Path, "/"))
-	if repo == "" || strings.Contains(repo, "/") {
+	repo := strings.ToLower(decodedPath)
+	if repo == "" || repo == "." || repo == ".." || strings.Contains(repo, "/") || strings.Contains(repo, "\\") {
 		return "", errors.New("repo path must be single segment")
 	}
 	return "repo://" + org + "/" + repo, nil
@@ -453,6 +469,9 @@ func normalizeResourcePath(rawPath, kind string) (string, error) {
 	if containsEncodedSeparators(rawPath) {
 		return "", fmt.Errorf("%s path encoded separators are not allowed", kind)
 	}
+	if kind == "file" && hasPlatformAbsolutePath(decodedPath) {
+		return "", errors.New("file path platform-specific absolute form detected")
+	}
 	if hasTraversalSegments(decodedPath) {
 		if kind == "file" {
 			return "", errors.New("file path traversal detected")
@@ -472,6 +491,16 @@ func normalizeResourcePath(rawPath, kind string) (string, error) {
 func containsEncodedSeparators(raw string) bool {
 	lower := strings.ToLower(raw)
 	return strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c")
+}
+
+func hasPlatformAbsolutePath(raw string) bool {
+	normalized := strings.ReplaceAll(raw, "\\", "/")
+	trimmed := strings.TrimLeft(normalized, "/")
+	if len(trimmed) >= 2 && trimmed[1] == ':' {
+		first := trimmed[0]
+		return (first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')
+	}
+	return false
 }
 
 func cleanPath(raw string) string {

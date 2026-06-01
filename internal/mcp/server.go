@@ -21,6 +21,7 @@ import (
 	"github.com/safe-agentic-world/prodclaw/internal/action"
 	"github.com/safe-agentic-world/prodclaw/internal/audit"
 	"github.com/safe-agentic-world/prodclaw/internal/canonicaljson"
+	"github.com/safe-agentic-world/prodclaw/internal/doctor"
 	"github.com/safe-agentic-world/prodclaw/internal/executor"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/normalize"
@@ -29,15 +30,19 @@ import (
 )
 
 type Server struct {
-	bundle      policy.Bundle
-	workspace   string
-	artifactDir string
-	auditPath   string
-	id          identity.VerifiedIdentity
-	httpRunner  *executor.HTTPRunner
-	redactor    *redact.Redactor
-	forwardTool ToolForwarder
-	commandExec func(context.Context, string, commandRequest) commandResult
+	bundle            policy.Bundle
+	workspace         string
+	artifactDir       string
+	workspaceReal     string
+	artifactDirReal   string
+	auditPath         string
+	id                identity.VerifiedIdentity
+	assuranceLevel    string
+	mediationCoverage []doctor.Coverage
+	httpRunner        *executor.HTTPRunner
+	redactor          *redact.Redactor
+	forwardTool       ToolForwarder
+	commandExec       func(context.Context, string, commandRequest) commandResult
 }
 
 func (s *Server) AdvertisedToolNames() []string {
@@ -134,6 +139,7 @@ func NewServer(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	realWorkspace := realBasePath(absWorkspace)
 	id := opts.Identity
 	if id.Principal == "" {
 		id.Principal = "system"
@@ -158,20 +164,26 @@ func NewServer(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	realArtifactDir := realBasePath(absArtifactDir)
 	redactor := opts.Redactor
 	if redactor == nil {
 		redactor = redact.DefaultRedactor()
 	}
+	assuranceLevel, mediationCoverage := doctor.AssuranceFromEnv(os.LookupEnv)
 	return &Server{
-		bundle:      opts.Bundle,
-		workspace:   absWorkspace,
-		artifactDir: absArtifactDir,
-		auditPath:   opts.AuditPath,
-		id:          id,
-		redactor:    redactor,
-		forwardTool: opts.ForwardTool,
-		httpRunner:  executor.NewHTTPRunner(nil),
-		commandExec: runCommand,
+		bundle:            opts.Bundle,
+		workspace:         absWorkspace,
+		artifactDir:       absArtifactDir,
+		workspaceReal:     realWorkspace,
+		artifactDirReal:   realArtifactDir,
+		auditPath:         opts.AuditPath,
+		id:                id,
+		assuranceLevel:    assuranceLevel,
+		mediationCoverage: mediationCoverage,
+		redactor:          redactor,
+		forwardTool:       opts.ForwardTool,
+		httpRunner:        executor.NewHTTPRunner(nil),
+		commandExec:       runCommand,
 	}, nil
 }
 
@@ -1162,6 +1174,8 @@ func (s *Server) recordAudit(auth authorizedAction, outcome executor.Outcome) {
 		Environment:        auth.normalized.Environment,
 		CIIdentity:         s.id.CI,
 		CredentialExposure: s.id.CredentialExposure,
+		AssuranceLevel:     s.assuranceLevel,
+		MediationCoverage:  s.mediationCoverage,
 		ActionFingerprint:  auth.fingerprint,
 		Decision:           auth.decision.Decision,
 		ReasonCode:         auth.decision.ReasonCode,
@@ -1215,6 +1229,9 @@ func (s *Server) workspacePath(input string) (string, string, error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", "", errors.New("path escapes workspace")
 	}
+	if err := ensureNoSymlinkEscape(s.workspace, s.workspaceReal, abs, "path escapes workspace"); err != nil {
+		return "", "", err
+	}
 	return abs, filepath.ToSlash(rel), nil
 }
 
@@ -1234,7 +1251,60 @@ func (s *Server) artifactPath(input string) (string, string, error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", "", errors.New("artifact path escapes artifact dir")
 	}
+	if err := ensureNoSymlinkEscape(s.artifactDir, s.artifactDirReal, abs, "artifact path escapes artifact dir"); err != nil {
+		return "", "", err
+	}
 	return abs, filepath.ToSlash(rel), nil
+}
+
+func realBasePath(abs string) string {
+	realPath, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(realPath)
+}
+
+func ensureNoSymlinkEscape(logicalBase, realBase, abs, escapeMessage string) error {
+	if realPath, err := filepath.EvalSymlinks(abs); err == nil {
+		return ensureWithinRealBase(realBase, realPath, escapeMessage)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	parent := filepath.Dir(abs)
+	for {
+		if _, err := os.Lstat(parent); err == nil {
+			rel, relErr := filepath.Rel(logicalBase, parent)
+			if relErr != nil {
+				return relErr
+			}
+			if rel == "." || (!filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+				realParent, err := filepath.EvalSymlinks(parent)
+				if err != nil {
+					return err
+				}
+				return ensureWithinRealBase(realBase, realParent, escapeMessage)
+			}
+			return nil
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			return nil
+		}
+		parent = next
+	}
+}
+
+func ensureWithinRealBase(realBase, realPath, escapeMessage string) error {
+	rel, err := filepath.Rel(realBase, realPath)
+	if err != nil {
+		return err
+	}
+	if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return errors.New(escapeMessage)
+	}
+	return nil
 }
 
 func fileResource(rel string) string {

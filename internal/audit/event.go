@@ -3,6 +3,7 @@ package audit
 import (
 	"encoding/json"
 
+	"github.com/safe-agentic-world/prodclaw/internal/doctor"
 	"github.com/safe-agentic-world/prodclaw/internal/executor"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/redact"
@@ -25,6 +26,8 @@ type Event struct {
 	Environment        string                             `json:"environment"`
 	CIIdentity         identity.CIIdentity                `json:"ci_identity,omitempty"`
 	CredentialExposure identity.CredentialExposureSummary `json:"credential_exposure,omitempty"`
+	AssuranceLevel     string                             `json:"assurance_level,omitempty"`
+	MediationCoverage  []doctor.Coverage                  `json:"mediation_coverage,omitempty"`
 	ActionFingerprint  string                             `json:"action_fingerprint"`
 	Decision           string                             `json:"decision"`
 	ReasonCode         string                             `json:"reason_code"`
@@ -61,6 +64,12 @@ func RedactEvent(event Event, redactor *redact.Redactor) Event {
 	event.Environment = redactor.RedactText(event.Environment)
 	event.CIIdentity = redactCIIdentity(event.CIIdentity, redactor)
 	event.CredentialExposure = redactCredentialExposure(event.CredentialExposure, redactor)
+	event.AssuranceLevel = redactor.RedactText(event.AssuranceLevel)
+	for idx, coverage := range event.MediationCoverage {
+		event.MediationCoverage[idx].Surface = redactor.RedactText(coverage.Surface)
+		event.MediationCoverage[idx].Level = redactor.RedactText(coverage.Level)
+		event.MediationCoverage[idx].Evidence = redactor.RedactText(coverage.Evidence)
+	}
 	event.ReasonCode = redactor.RedactText(event.ReasonCode)
 	event.ExecCondition = redactor.RedactText(event.ExecCondition)
 	event.HTTPFinalResource = redactor.RedactText(event.HTTPFinalResource)

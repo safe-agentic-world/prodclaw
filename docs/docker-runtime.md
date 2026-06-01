@@ -2,7 +2,7 @@
 
 ProdClaw's Docker image is the recommended path for CI jobs that want stronger, inspectable runtime guarantees than a local laptop run.
 
-The image still does not make strong enforcement claims by itself. Strong enforcement is claimed only when `prodclaw doctor --mode container` passes inside the same runtime that will launch the agent.
+The image still does not make strong enforcement claims by itself. Strong enforcement is claimed only when `prodclaw doctor --mode container` or `prodclaw doctor --mode ci` passes inside the same runtime that will launch the agent. See [Controlled Runtime Guarantees](controlled-runtime-guarantees.md) for the coverage matrix and residual risks.
 
 ## Build The Image
 
@@ -10,7 +10,7 @@ The image still does not make strong enforcement claims by itself. Strong enforc
 docker build -t prodclaw:local .
 ```
 
-The default image contains `prodclaw`, Git, Node.js, npm, CA certificates, and a non-root `prodclaw` user. It does not install Codex or Claude Code by default.
+The default image contains `prodclaw`, Git, curl, Node.js, npm, CA certificates, and a non-root `prodclaw` user. It does not install Codex or Claude Code by default.
 
 ## Optional Agent Install Paths
 
@@ -126,10 +126,32 @@ Run the doctor before claiming strong container enforcement:
 ```bash
 docker run --rm \
   -e PRODCLAW_EGRESS_BLOCKED=true \
+  -e PRODCLAW_WORKSPACE_MUTATION_DETECT=true \
   -v "$PWD:/workspace" \
   -v "$PWD/artifacts/prodclaw:/artifacts" \
   prodclaw:local \
   doctor --mode container --workspace /workspace --artifact-dir /artifacts
+```
+
+For CI jobs that also need verified GitHub Actions or GitLab CI identity, run:
+
+```bash
+docker run --rm \
+  -e PRODCLAW_EGRESS_BLOCKED=true \
+  -e PRODCLAW_WORKSPACE_MUTATION_DETECT=true \
+  -e GITHUB_ACTIONS=true \
+  -e GITHUB_REPOSITORY \
+  -e GITHUB_REF \
+  -e GITHUB_SHA \
+  -e GITHUB_RUN_ID \
+  -e GITHUB_JOB \
+  -e GITHUB_ACTOR \
+  -e GITHUB_EVENT_NAME \
+  -e GITHUB_WORKSPACE=/workspace \
+  -v "$PWD:/workspace" \
+  -v "$PWD/artifacts/prodclaw:/artifacts" \
+  prodclaw:local \
+  doctor --mode ci --workspace /workspace --artifact-dir /artifacts
 ```
 
 The doctor checks:
@@ -140,10 +162,14 @@ The doctor checks:
 - `/artifacts` writability
 - agent process environment allowlist
 - explicit egress-control declaration
+- workspace mutation blocking or detection declaration
+- raw upstream MCP overlap declaration
 
 The text output prints `Strong enforcement claim:` only when every check passes. JSON output sets `strong_enforcement` to `true` only in that case.
 
 `PRODCLAW_EGRESS_BLOCKED=true` is a runtime assertion made by the CI/container operator. Set it only after the job has a real egress block, such as `--network none` for offline dry-runs or a runner-level firewall for real agent jobs that need selected platform endpoints.
+
+Set `PRODCLAW_WORKSPACE_MUTATION_DETECT=true` when the job fails changed workspace files that lack successful ProdClaw `fs.write` or `repo.apply_patch` audit evidence. Set `PRODCLAW_WORKSPACE_MUTATION_PROTECTED=true` only when the runtime blocks direct workspace writes outside ProdClaw.
 
 ## Agent Environment Allowlist
 
@@ -160,6 +186,7 @@ For dry-run and policy-check jobs, use `--network none` where possible:
 ```bash
 docker run --rm --network none \
   -e PRODCLAW_EGRESS_BLOCKED=true \
+  -e PRODCLAW_WORKSPACE_MUTATION_DETECT=true \
   -v "$PWD:/workspace" \
   -v "$PWD/artifacts/prodclaw:/artifacts" \
   prodclaw:local \

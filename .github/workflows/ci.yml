@@ -38,8 +38,38 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Bypass Fixture Tests
+        run: |
+          go test ./internal/bypass ./internal/normalize ./internal/mcp \
+            -run 'Bypass|NormalizationBypass|Symlink|Redirect'
+
       - name: Vet
         run: go vet ./...
+
+      - name: Controlled Runtime Direct Curl Fixture
+        run: |
+          docker build -t prodclaw:bypass .
+          mkdir -p artifacts/prodclaw
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            -e PRODCLAW_EGRESS_BLOCKED=true \
+            -e PRODCLAW_WORKSPACE_MUTATION_DETECT=true \
+            -v "$PWD:/workspace" \
+            -v "$PWD/artifacts/prodclaw:/artifacts" \
+            prodclaw:bypass \
+            doctor --mode container --workspace /workspace --artifact-dir /artifacts
+          set +e
+          docker run --rm --network none \
+            -e PRODCLAW_EGRESS_BLOCKED=true \
+            -e PRODCLAW_WORKSPACE_MUTATION_DETECT=true \
+            -v "$PWD:/workspace" \
+            prodclaw:bypass \
+            sh -lc 'curl -fsS https://denied.example.invalid'
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "direct curl unexpectedly succeeded"
+            exit 1
+          fi
 
       - name: Policy Smoke Test
         run: |

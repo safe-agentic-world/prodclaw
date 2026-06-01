@@ -75,13 +75,13 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	var workspace string
 	var artifactDir string
 	var format string
-	fs.StringVar(&mode, "mode", "container", "doctor mode: container")
+	fs.StringVar(&mode, "mode", "container", "doctor mode: container|ci")
 	fs.StringVar(&workspace, "workspace", "", "workspace mount path")
 	fs.StringVar(&artifactDir, "artifact-dir", "", "artifact mount path")
 	fs.StringVar(&format, "format", "text", "output format: text|json")
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage:")
-		fmt.Fprintln(stderr, "  prodclaw doctor --mode container [--workspace <path>] [--artifact-dir <path>] [--format text|json]")
+		fmt.Fprintln(stderr, "  prodclaw doctor --mode container|ci [--workspace <path>] [--artifact-dir <path>] [--format text|json]")
 	}
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -119,6 +119,11 @@ func printDoctorReport(w io.Writer, report doctor.Report) {
 	fmt.Fprintf(w, "Artifacts: %s\n", report.ArtifactDir)
 	for _, check := range report.Checks {
 		fmt.Fprintf(w, "%-24s %-4s %s\n", check.ID, strings.ToUpper(check.Status), check.Message)
+	}
+	fmt.Fprintf(w, "Assurance level: %s\n", report.AssuranceLevel)
+	fmt.Fprintln(w, "Mediation coverage:")
+	for _, coverage := range report.MediationCoverage {
+		fmt.Fprintf(w, "  %-16s %-7s %s\n", coverage.Surface, strings.ToUpper(coverage.Level), coverage.Evidence)
 	}
 	if report.StrongEnforcement {
 		fmt.Fprintf(w, "Strong enforcement claim: %s\n", report.StrongEnforcementClaim)
@@ -511,6 +516,8 @@ type policyExplainOutput struct {
 	ObligationsPreview    map[string]any                  `json:"obligations_preview"`
 	ExecAuthorization     policy.ExecAuthorizationSummary `json:"exec_authorization"`
 	MatchedRuleProvenance []policy.MatchedRuleProvenance  `json:"matched_rule_provenance"`
+	AssuranceLevel        string                          `json:"assurance_level"`
+	MediationCoverage     []doctor.Coverage               `json:"mediation_coverage"`
 }
 
 func evaluatePolicy(opts policyEvalOptions) (any, error) {
@@ -561,6 +568,7 @@ func evaluatePolicy(opts policyEvalOptions) (any, error) {
 	if !opts.Explain {
 		return base, nil
 	}
+	assuranceLevel, mediationCoverage := doctor.AssuranceFromEnv(os.LookupEnv)
 	return policyExplainOutput{
 		policyCheckOutput:     base,
 		DenyRules:             details.DenyRules,
@@ -568,6 +576,8 @@ func evaluatePolicy(opts policyEvalOptions) (any, error) {
 		ObligationsPreview:    details.ObligationsPreview,
 		ExecAuthorization:     details.ExecAuthorization,
 		MatchedRuleProvenance: details.MatchedRuleProvenance,
+		AssuranceLevel:        assuranceLevel,
+		MediationCoverage:     mediationCoverage,
 	}, nil
 }
 

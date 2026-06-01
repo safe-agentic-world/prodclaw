@@ -5,16 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-const normalizationCorpusDigest = "308d66844a51a7506d1ff287acc435a7f8a12f23e073c727a609dca0bf5b4f60"
+const normalizationCorpusDigest = "a6e19922705ba7e5375a4e75410d2292e563d547057252bcdb2ac0354bada345"
 
 type corpusEntry struct {
 	Name          string `json:"name"`
+	Kind          string `json:"kind,omitempty"`
 	Resource      string `json:"resource"`
 	Normalized    string `json:"normalized,omitempty"`
 	ErrorContains string `json:"error_contains,omitempty"`
@@ -26,7 +28,7 @@ func TestNormalizationGoldenCorpus(t *testing.T) {
 		t.Fatalf("expected at least 250 corpus entries, got %d", len(entries))
 	}
 	for _, entry := range entries {
-		got, err := normalizeCorpusResource(entry.Resource)
+		got, err := normalizeCorpusResource(entry)
 		if err != nil {
 			t.Fatalf("%s: normalize: %v", entry.Name, err)
 		}
@@ -42,7 +44,7 @@ func TestNormalizationBypassCorpus(t *testing.T) {
 		t.Fatal("expected bypass corpus entries")
 	}
 	for _, entry := range entries {
-		got, err := normalizeCorpusResource(entry.Resource)
+		got, err := normalizeCorpusResource(entry)
 		if entry.ErrorContains != "" {
 			if err == nil {
 				t.Fatalf("%s: expected error containing %q, got normalized %s", entry.Name, entry.ErrorContains, got)
@@ -69,7 +71,7 @@ func TestNormalizationCorpusDigestStable(t *testing.T) {
 	for _, fileName := range []string{"corpus.jsonl", "bypass_attempts.jsonl"} {
 		entries := loadCorpusEntries(t, fileName)
 		for _, entry := range entries {
-			got, err := normalizeCorpusResource(entry.Resource)
+			got, err := normalizeCorpusResource(entry)
 			if entry.ErrorContains != "" {
 				if err == nil {
 					t.Fatalf("%s: expected error", entry.Name)
@@ -89,8 +91,15 @@ func TestNormalizationCorpusDigestStable(t *testing.T) {
 	}
 }
 
-func normalizeCorpusResource(raw string) (string, error) {
-	return NormalizeResource(raw)
+func normalizeCorpusResource(entry corpusEntry) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(entry.Kind)) {
+	case "", "resource":
+		return NormalizeResource(entry.Resource)
+	case "redirect":
+		return NormalizeRedirectURL(entry.Resource)
+	default:
+		return "", errors.New("unsupported corpus kind")
+	}
 }
 
 func loadCorpusEntries(t *testing.T, fileName string) []corpusEntry {

@@ -490,6 +490,68 @@ rules:
 	if !event.RedactionSummary.Applied || !event.RedactionSummary.Truncated {
 		t.Fatalf("expected redaction summary, got %+v", event)
 	}
+	if event.AssuranceLevel == "" || len(event.MediationCoverage) == 0 {
+		t.Fatalf("expected assurance metadata in audit event, got %+v", event)
+	}
+}
+
+func TestReadFileRejectsSymlinkEscape(t *testing.T) {
+	bundle := mustBundle(t, `version: v1
+rules:
+  - id: allow-read
+    action_type: fs.read
+    resource: file://workspace/**
+    decision: ALLOW
+`)
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret\n"), 0o600); err != nil {
+		t.Fatalf("write outside fixture: %v", err)
+	}
+	link := filepath.Join(workspace, "link.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	server, err := NewServer(Options{Bundle: bundle, Workspace: workspace})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	if _, err := server.readFile(context.Background(), json.RawMessage(`{"path":"link.txt"}`)); err == nil || !strings.Contains(err.Error(), "escapes workspace") {
+		t.Fatalf("expected symlink escape rejection, got %v", err)
+	}
+}
+
+func TestWriteFileRejectsSymlinkEscape(t *testing.T) {
+	bundle := mustBundle(t, `version: v1
+rules:
+  - id: allow-write
+    action_type: fs.write
+    resource: file://workspace/**
+    decision: ALLOW
+`)
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("original\n"), 0o600); err != nil {
+		t.Fatalf("write outside fixture: %v", err)
+	}
+	link := filepath.Join(workspace, "link.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	server, err := NewServer(Options{Bundle: bundle, Workspace: workspace})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	if _, err := server.writeFile(context.Background(), json.RawMessage(`{"path":"link.txt","content":"mutated\n"}`)); err == nil || !strings.Contains(err.Error(), "escapes workspace") {
+		t.Fatalf("expected symlink escape rejection, got %v", err)
+	}
+	data, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("read outside fixture: %v", err)
+	}
+	if string(data) != "original\n" {
+		t.Fatalf("outside file was mutated: %q", string(data))
+	}
 }
 
 func TestServerSupportsArtifactWriteAndForwardedToolCalls(t *testing.T) {

@@ -108,6 +108,32 @@
         }
       }
     },
+    "assurance_level": {
+      "type": "string",
+      "enum": ["strong", "partial", "none"]
+    },
+    "mediation_coverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["surface", "level", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "surface": {
+            "type": "string",
+            "minLength": 1
+          },
+          "level": {
+            "type": "string",
+            "enum": ["strong", "partial", "none"]
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "action_fingerprint": {
       "type": "string",
       "minLength": 64,

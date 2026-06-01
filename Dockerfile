@@ -28,7 +28,7 @@ ARG INSTALL_CLAUDE=false
 ARG CLAUDE_NPM_PACKAGE=@anthropic-ai/claude-code
 ARG CLAUDE_NPM_VERSION=latest
 
-RUN apk add --no-cache ca-certificates git nodejs npm openssh-client tini \
+RUN apk add --no-cache ca-certificates curl git nodejs npm openssh-client tini \
     && addgroup -S -g 10001 prodclaw \
     && adduser -S -D -H -h /home/prodclaw -u 10001 -G prodclaw prodclaw \
     && mkdir -p /home/prodclaw /workspace /artifacts /tmp/prodclaw \

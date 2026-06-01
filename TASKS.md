@@ -855,26 +855,26 @@ Nomos reference: check `../nomos` for reusable code, tests, or docs patterns; co
 
 Deliverables:
 
-- [ ] `prodclaw doctor --mode ci`.
-- [ ] mediation coverage matrix for filesystem, process, network, credentials, repo publishing, upstream tools, and artifacts.
-- [ ] derived assurance level recorded in explain output, audit, and job metadata.
-- [ ] check for direct network egress controls.
-- [ ] check for credential exposure in agent environment.
-- [ ] check for writable workspace bypass risk.
-- [ ] check for raw upstream MCP servers beside ProdClaw.
-- [ ] normalization bypass corpus for file paths, repo refs, URLs, redirect hops, and platform-specific path forms.
-- [ ] bypass fixture suite for path traversal, symlink escape, direct shell/network, direct credential read, direct workspace mutation, redirect escape, and protected-branch push.
-- [ ] CI workflow that runs bypass fixtures.
-- [ ] documentation of residual risks by environment.
+- [x] `prodclaw doctor --mode ci`.
+- [x] mediation coverage matrix for filesystem, process, network, credentials, repo publishing, upstream tools, and artifacts.
+- [x] derived assurance level recorded in explain output, audit, and job metadata.
+- [x] check for direct network egress controls.
+- [x] check for credential exposure in agent environment.
+- [x] check for writable workspace bypass risk.
+- [x] check for raw upstream MCP servers beside ProdClaw.
+- [x] normalization bypass corpus for file paths, repo refs, URLs, redirect hops, and platform-specific path forms.
+- [x] bypass fixture suite for path traversal, symlink escape, direct shell/network, direct credential read, direct workspace mutation, redirect escape, and protected-branch push.
+- [x] CI workflow that runs bypass fixtures.
+- [x] documentation of residual risks by environment.
 
 Acceptance:
 
-- [ ] Direct `curl` to a denied host fails in strong-mode fixture.
-- [ ] Direct read of secret fixture path fails or is detected as a runtime guarantee failure.
-- [ ] Direct workspace mutation outside ProdClaw fails or is detected as a runtime guarantee failure.
-- [ ] Raw upstream MCP server overlap is detected before launch.
-- [ ] Audit artifacts show denied governed bypass attempts.
-- [ ] ProdClaw never claims strong enforcement unless controlled-runtime checks and evidence support it.
+- [x] Direct `curl` to a denied host fails in strong-mode fixture.
+- [x] Direct read of secret fixture path fails or is detected as a runtime guarantee failure.
+- [x] Direct workspace mutation outside ProdClaw fails or is detected as a runtime guarantee failure.
+- [x] Raw upstream MCP server overlap is detected before launch.
+- [x] Audit artifacts show denied governed bypass attempts.
+- [x] ProdClaw never claims strong enforcement unless controlled-runtime checks and evidence support it.
 
 ## M16 - Audit Evidence, Replay, And Incident Review
 

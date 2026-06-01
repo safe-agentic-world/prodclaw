@@ -14,6 +14,7 @@ import (
 
 	agentkit "github.com/safe-agentic-world/prodclaw/internal/agent"
 	runtimeconfig "github.com/safe-agentic-world/prodclaw/internal/config"
+	"github.com/safe-agentic-world/prodclaw/internal/doctor"
 	"github.com/safe-agentic-world/prodclaw/internal/executor"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	jobkit "github.com/safe-agentic-world/prodclaw/internal/job"
@@ -44,6 +45,8 @@ type jobRunOutput struct {
 	BudgetLimits        jobkit.BudgetLimits                `json:"budget_limits"`
 	PreflightTools      []string                           `json:"preflight_tools,omitempty"`
 	ControlledCI        bool                               `json:"controlled_ci"`
+	AssuranceLevel      string                             `json:"assurance_level"`
+	MediationCoverage   []doctor.Coverage                  `json:"mediation_coverage"`
 	Principal           string                             `json:"principal"`
 	Environment         string                             `json:"environment"`
 	CIIdentity          identity.CIIdentity                `json:"ci_identity,omitempty"`
@@ -255,6 +258,10 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "job run: generated launch plan could not verify ProdClaw MCP attachment")
 		return jobkit.ExitRuntimeGuaranteeFailure
 	}
+	if rawMCPServers := strings.TrimSpace(os.Getenv("PRODCLAW_RAW_MCP_SERVERS")); rawMCPServers != "" {
+		fmt.Fprintf(stderr, "job run: raw upstream MCP servers declared beside ProdClaw: %s\n", rawMCPServers)
+		return jobkit.ExitRuntimeGuaranteeFailure
+	}
 	var preflightTools []string
 	if probeTools {
 		preflightTools, err = probeJobTools(selection.Bundle, workspaceAbs, artifacts.AgentArtifacts, cfg.AuditPath, verifiedIdentity)
@@ -263,6 +270,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 			return jobkit.ExitRuntimeGuaranteeFailure
 		}
 	}
+	assuranceLevel, mediationCoverage := jobRuntimeAssurance(cfg.ControlledCI, workspaceAbs, artifactDirAbs)
 	output := jobRunOutput{
 		Mode:                selectJobRunMode(dryRun, noLaunch),
 		Agent:               verifiedIdentity.Agent,
@@ -283,6 +291,8 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		BudgetLimits:        budgetLimits,
 		PreflightTools:      preflightTools,
 		ControlledCI:        cfg.ControlledCI,
+		AssuranceLevel:      assuranceLevel,
+		MediationCoverage:   mediationCoverage,
 		Principal:           verifiedIdentity.Principal,
 		Environment:         verifiedIdentity.Environment,
 		CIIdentity:          verifiedIdentity.CI,
@@ -378,6 +388,35 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	}
 	writeJobSummary(stderr, output, result)
 	return result.ExitCode
+}
+
+func jobRuntimeAssurance(controlledCI bool, workspace, artifactDir string) (string, []doctor.Coverage) {
+	mode := "container"
+	if controlledCI {
+		mode = "ci"
+	}
+	report, err := doctor.Run(doctor.Options{
+		Mode:        mode,
+		Workspace:   workspace,
+		ArtifactDir: artifactDir,
+		LookupEnv:   jobAssuranceLookup(os.LookupEnv),
+	})
+	if err == nil {
+		return report.AssuranceLevel, report.MediationCoverage
+	}
+	return doctor.AssuranceFromEnv(jobAssuranceLookup(os.LookupEnv))
+}
+
+func jobAssuranceLookup(base identity.LookupEnv) identity.LookupEnv {
+	if base == nil {
+		base = os.LookupEnv
+	}
+	return func(key string) (string, bool) {
+		if key == "PRODCLAW_WORKSPACE_MUTATION_DETECT" {
+			return "true", true
+		}
+		return base(key)
+	}
 }
 
 func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, workspace, bundlePath, profileName string, controlledCI bool, policyInputFlags policyInputFlagValues) {
