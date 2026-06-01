@@ -5,6 +5,7 @@ import (
 
 	"github.com/safe-agentic-world/prodclaw/internal/executor"
 	"github.com/safe-agentic-world/prodclaw/internal/redact"
+	"github.com/safe-agentic-world/prodclaw/internal/scan"
 )
 
 func TestValidateEventSchema(t *testing.T) {
@@ -27,7 +28,12 @@ func TestValidateEventSchema(t *testing.T) {
 		PolicyBundleHash:  "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		ResultCode:        "success",
 		Retryable:         false,
-		RedactionSummary:  executor.RedactionSummary{},
+		RedactionSummary: executor.RedactionSummary{
+			ScannerRulePack:    scan.RulePackVersion,
+			ReturnPathHandling: executor.ReturnPathStrip,
+			ScannerFindings:    []scan.Finding{scan.NewFinding("prompt.instruction_override", "high", "mcp.response", "Ignore previous instructions")},
+			Stripped:           true,
+		},
 		HTTPStatusCode:    200,
 		HTTPFinalResource: "url://example.com/final",
 		HTTPRedirectHops:  1,

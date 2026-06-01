@@ -16,6 +16,7 @@ import (
 
 	"github.com/safe-agentic-world/prodclaw/internal/audit"
 	"github.com/safe-agentic-world/prodclaw/internal/executor"
+	"github.com/safe-agentic-world/prodclaw/internal/scan"
 )
 
 const MaxTaskBytes = 64 * 1024
@@ -40,6 +41,7 @@ const (
 	ReasonRuntimeGuaranteeFailure = "runtime_guarantee_failure"
 	ReasonInternalError           = "internal_error"
 	ReasonBudgetExhausted         = "budget_exhausted"
+	ReasonReturnPathViolation     = "return_path_violation"
 )
 
 type BudgetLimits struct {
@@ -93,16 +95,17 @@ type EvaluationInput struct {
 }
 
 type Result struct {
-	ExitReason              string        `json:"exit_reason"`
-	ExitCode                int           `json:"exit_code"`
-	ExpectedActions         []string      `json:"expected_actions,omitempty"`
-	ObservedActions         []string      `json:"observed_actions,omitempty"`
-	DeniedActions           []string      `json:"denied_actions,omitempty"`
-	MissingExpectedActions  []string      `json:"missing_expected_actions,omitempty"`
-	ChangedFiles            []ChangedFile `json:"changed_files,omitempty"`
-	MissingMutationEvidence []string      `json:"missing_mutation_evidence,omitempty"`
-	Budgets                 BudgetSummary `json:"budgets"`
-	AgentFailureMarkers     []string      `json:"agent_failure_markers,omitempty"`
+	ExitReason              string         `json:"exit_reason"`
+	ExitCode                int            `json:"exit_code"`
+	ExpectedActions         []string       `json:"expected_actions,omitempty"`
+	ObservedActions         []string       `json:"observed_actions,omitempty"`
+	DeniedActions           []string       `json:"denied_actions,omitempty"`
+	MissingExpectedActions  []string       `json:"missing_expected_actions,omitempty"`
+	ChangedFiles            []ChangedFile  `json:"changed_files,omitempty"`
+	MissingMutationEvidence []string       `json:"missing_mutation_evidence,omitempty"`
+	Budgets                 BudgetSummary  `json:"budgets"`
+	AgentFailureMarkers     []string       `json:"agent_failure_markers,omitempty"`
+	ReturnPathFindings      []scan.Finding `json:"return_path_findings,omitempty"`
 }
 
 func ReadTaskFile(workspace, raw string) (string, string, error) {
@@ -193,6 +196,56 @@ func ReadAuditEvents(path string) ([]audit.Event, error) {
 		return nil, err
 	}
 	return events, nil
+}
+
+func SanitizeArtifactTree(root string) ([]scan.Finding, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, nil
+	}
+	var findings []scan.Finding
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		locationKind := "artifact"
+		if rel != "." {
+			locationKind = "artifact:" + filepath.ToSlash(rel)
+		}
+		fileFindings := scan.FindCorpusLeaks(data, locationKind)
+		if len(fileFindings) == 0 {
+			return nil
+		}
+		findings = append(findings, fileFindings...)
+		redacted := scan.RedactCorpusText(string(data))
+		if redacted != string(data) {
+			if err := os.WriteFile(path, []byte(redacted), info.Mode().Perm()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return scan.DedupeFindings(findings), nil
 }
 
 func Evaluate(input EvaluationInput) Result {

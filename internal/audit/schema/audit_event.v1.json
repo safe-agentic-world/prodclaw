@@ -145,6 +145,50 @@
         },
         "truncated": {
           "type": "boolean"
+        },
+        "scanner_rule_pack": {
+          "type": "string",
+          "minLength": 1
+        },
+        "return_path_handling": {
+          "type": "string",
+          "enum": ["allow", "fence", "strip", "deny", "mixed"]
+        },
+        "scanner_findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["rule_id", "severity", "location_kind", "digest"],
+            "additionalProperties": false,
+            "properties": {
+              "rule_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "severity": {
+                "type": "string",
+                "minLength": 1
+              },
+              "location_kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "digest": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64
+              }
+            }
+          }
+        },
+        "fenced": {
+          "type": "boolean"
+        },
+        "stripped": {
+          "type": "boolean"
+        },
+        "denied": {
+          "type": "boolean"
         }
       }
     },

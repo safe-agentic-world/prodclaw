@@ -1078,13 +1078,24 @@ func (s *Server) writeArtifact(ctx context.Context, args json.RawMessage) (any, 
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return s.failureResult(auth, err), nil
 	}
-	if err := os.WriteFile(abs, []byte(input.Content), 0o600); err != nil {
+	sanitizedContent, summary := executor.SanitizeOutputForLocation(s.redactor, input.Content, auth.decision.Obligations, 0, 0, "artifact.write")
+	outcome := executor.Outcome{
+		ResultCode:       executor.ResultSuccess,
+		RedactionSummary: summary,
+		ArtifactBytes:    len([]byte(sanitizedContent)),
+	}
+	if summary.Denied {
+		outcome.ResultCode = executor.ResultReturnPathDenied
+		outcome.ArtifactBytes = 0
+		return s.textResultWithOutcome(auth, "DENY artifact.write return-path scanner findings blocked content", outcome, true, 0, 0), nil
+	}
+	if err := os.WriteFile(abs, []byte(sanitizedContent), 0o600); err != nil {
 		return s.failureResult(auth, err), nil
 	}
 	if err := execCtx.Err(); err != nil {
 		return s.failureResult(auth, err), nil
 	}
-	return s.textResultWithOutcome(auth, "ALLOW artifact.write wrote "+rel, executor.Outcome{ResultCode: executor.ResultSuccess, ArtifactBytes: len(input.Content)}, false, 0, 0), nil
+	return s.textResultWithOutcome(auth, "ALLOW artifact.write wrote "+rel, outcome, false, 0, 0), nil
 }
 
 func decodeArgs(args json.RawMessage, dst any) error {
@@ -1294,14 +1305,19 @@ func (s *Server) textResult(auth authorizedAction, text, resultCode string, retr
 }
 
 func (s *Server) textResultWithOutcome(auth authorizedAction, text string, outcome executor.Outcome, isError bool, requestedMaxBytes, requestedMaxLines int) map[string]any {
-	sanitized, summary := executor.SanitizeOutput(s.redactor, text, auth.decision.Obligations, requestedMaxBytes, requestedMaxLines)
-	outcome.RedactionSummary = summary
+	sanitized, summary := executor.SanitizeOutputForLocation(s.redactor, text, auth.decision.Obligations, requestedMaxBytes, requestedMaxLines, "mcp.response")
+	outcome.RedactionSummary = executor.MergeRedactionSummaries(outcome.RedactionSummary, summary)
+	if summary.Denied {
+		outcome.ResultCode = executor.ResultReturnPathDenied
+		outcome.Retryable = false
+		isError = true
+	}
 	outcome.ReturnedBytes = len([]byte(sanitized))
 	s.recordAudit(auth, outcome)
 	result := map[string]any{
 		"result_code": outcome.ResultCode,
 		"retryable":   outcome.Retryable,
-		"redaction":   summary,
+		"redaction":   outcome.RedactionSummary,
 		"content":     []map[string]any{{"type": "text", "text": sanitized}},
 		"isError":     isError,
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/safe-agentic-world/prodclaw/internal/executor"
 	jobkit "github.com/safe-agentic-world/prodclaw/internal/job"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
+	"github.com/safe-agentic-world/prodclaw/internal/scan"
 )
 
 func TestRunVersion(t *testing.T) {
@@ -751,6 +752,52 @@ func TestJobRunSucceedsWithExpectedGovernedMutationEvidence(t *testing.T) {
 	result := readLatestJobResult(t, workspace)
 	if result.ExitReason != jobkit.ReasonSuccess || len(result.MissingExpectedActions) != 0 || len(result.MissingMutationEvidence) != 0 {
 		t.Fatalf("expected successful governed mutation result, got %+v", result)
+	}
+}
+
+func TestJobRunNoLeakHarnessFailsClosedAndRedactsRawArtifactLeak(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := t.TempDir()
+	artifactDir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	secret := scan.CorpusSecrets()[0]
+	restore := stubSuccessfulLaunch(t, func(plan agentkit.LaunchPlan, stdout io.Writer) error {
+		leakPath := filepath.Join(filepath.Dir(plan.MCPConfigPath), "raw-leak.txt")
+		return os.WriteFile(leakPath, []byte("leaked "+secret+"\n"), 0o600)
+	})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{
+		"run",
+		"--agent", "codex",
+		"--task", taskPath,
+		"--workspace", workspace,
+		"--artifact-dir", artifactDir,
+	}, &stdout, &stderr)
+	if code != jobkit.ExitInternalError {
+		t.Fatalf("job run exit code = %d, want %d; stderr=%s", code, jobkit.ExitInternalError, stderr.String())
+	}
+	var result jobkit.Result
+	readJSONFile(t, filepath.Join(artifactDir, "job-result.json"), &result)
+	if result.ExitReason != jobkit.ReasonReturnPathViolation || len(result.ReturnPathFindings) == 0 {
+		t.Fatalf("expected return-path violation findings, got %+v", result)
+	}
+	findingBytes, err := json.Marshal(result.ReturnPathFindings)
+	if err != nil {
+		t.Fatalf("marshal findings: %v", err)
+	}
+	if strings.Contains(string(findingBytes), secret) {
+		t.Fatalf("findings leaked raw secret: %s", findingBytes)
+	}
+	data, err := os.ReadFile(filepath.Join(artifactDir, "raw-leak.txt"))
+	if err != nil {
+		t.Fatalf("read raw leak artifact: %v", err)
+	}
+	if strings.Contains(string(data), secret) || !strings.Contains(string(data), "[REDACTED]") {
+		t.Fatalf("raw artifact leak was not redacted: %q", string(data))
 	}
 }
 

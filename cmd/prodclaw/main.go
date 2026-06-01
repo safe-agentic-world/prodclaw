@@ -17,6 +17,7 @@ import (
 	"github.com/safe-agentic-world/prodclaw/internal/mcp"
 	"github.com/safe-agentic-world/prodclaw/internal/normalize"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
+	"github.com/safe-agentic-world/prodclaw/internal/redact"
 	"github.com/safe-agentic-world/prodclaw/internal/version"
 	"github.com/safe-agentic-world/prodclaw/profiles"
 )
@@ -508,9 +509,13 @@ func evaluatePolicy(opts policyEvalOptions) (any, error) {
 }
 
 func writeJSON(w io.Writer, value any) error {
+	safeValue, err := redact.DefaultRedactor().RedactJSONValue(value)
+	if err != nil {
+		return err
+	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(value)
+	return enc.Encode(safeValue)
 }
 
 func flagWasSet(fs *flag.FlagSet, name string) bool {

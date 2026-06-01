@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,11 +14,13 @@ import (
 
 	agentkit "github.com/safe-agentic-world/prodclaw/internal/agent"
 	runtimeconfig "github.com/safe-agentic-world/prodclaw/internal/config"
+	"github.com/safe-agentic-world/prodclaw/internal/executor"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	jobkit "github.com/safe-agentic-world/prodclaw/internal/job"
 	"github.com/safe-agentic-world/prodclaw/internal/logging"
 	"github.com/safe-agentic-world/prodclaw/internal/mcp"
 	"github.com/safe-agentic-world/prodclaw/internal/policy"
+	"github.com/safe-agentic-world/prodclaw/internal/redact"
 )
 
 type jobRunOutput struct {
@@ -56,6 +59,7 @@ type jobArtifactPaths struct {
 	ChangedFiles   string `json:"changed_files"`
 	Result         string `json:"job_result"`
 	AgentMessage   string `json:"agent_message,omitempty"`
+	AgentLog       string `json:"agent_log,omitempty"`
 	AgentArtifacts string `json:"agent_artifacts"`
 }
 
@@ -323,7 +327,8 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 			EndTime:         start,
 			BudgetLimits:    budgetLimits,
 		})
-		if err := writeFinalJobArtifacts(output, changed, result); err != nil {
+		result, err = finalizeJobArtifacts(output, changed, result)
+		if err != nil {
 			fmt.Fprintf(stderr, "job run: write artifacts: %v\n", err)
 			return jobkit.ExitInternalError
 		}
@@ -334,14 +339,17 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		return result.ExitCode
 	}
 
-	launchStdout, closeLaunchOutput, err := agentLaunchWriter(output, stdout)
+	launchStdout, launchStderr, closeLaunchOutput, err := agentLaunchWriters(output, stdout, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: prepare agent output: %v\n", err)
 		return jobkit.ExitInternalError
 	}
-	launchErr := launchJobAgent(launchPlan, launchStdout, stderr)
+	launchErr := launchJobAgent(launchPlan, launchStdout, launchStderr)
 	if closeErr := closeLaunchOutput(); closeErr != nil && launchErr == nil {
 		launchErr = closeErr
+	}
+	if err := sanitizeAgentMessageFile(artifacts.AgentMessage); err != nil && launchErr == nil {
+		launchErr = err
 	}
 	end := jobNow().UTC()
 	after := jobkit.GitStatus(workspaceAbs)
@@ -363,7 +371,8 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		EndTime:              end,
 		BudgetLimits:         budgetLimits,
 	})
-	if err := writeFinalJobArtifacts(output, changed, result); err != nil {
+	result, err = finalizeJobArtifacts(output, changed, result)
+	if err != nil {
 		fmt.Fprintf(stderr, "job run: write artifacts: %v\n", err)
 		return jobkit.ExitInternalError
 	}
@@ -492,6 +501,7 @@ func newJobArtifactPaths(dir string) jobArtifactPaths {
 		Audit:          filepath.Join(dir, "audit.jsonl"),
 		ChangedFiles:   filepath.Join(dir, "changed-files.json"),
 		Result:         filepath.Join(dir, "job-result.json"),
+		AgentLog:       filepath.Join(dir, "agent-stderr.txt"),
 		AgentArtifacts: filepath.Join(dir, "agent-artifacts"),
 	}
 }
@@ -548,6 +558,9 @@ func writePreparedJobArtifacts(output jobRunOutput) error {
 	if err := os.MkdirAll(output.Artifacts.AgentArtifacts, 0o700); err != nil {
 		return err
 	}
+	if err := ensureFile(output.Artifacts.AgentLog); err != nil {
+		return err
+	}
 	if err := writeJSONFile(output.Artifacts.Plan, output); err != nil {
 		return err
 	}
@@ -570,8 +583,29 @@ func writeFinalJobArtifacts(output jobRunOutput, changed jobkit.ChangedFilesSumm
 	return writeJSONFile(output.Artifacts.Result, result)
 }
 
+func finalizeJobArtifacts(output jobRunOutput, changed jobkit.ChangedFilesSummary, result jobkit.Result) (jobkit.Result, error) {
+	if err := writeFinalJobArtifacts(output, changed, result); err != nil {
+		return result, err
+	}
+	findings, err := jobkit.SanitizeArtifactTree(output.ArtifactDir)
+	if err != nil {
+		return result, err
+	}
+	if len(findings) == 0 {
+		return result, nil
+	}
+	result.ExitReason = jobkit.ReasonReturnPathViolation
+	result.ExitCode = jobkit.ExitInternalError
+	result.ReturnPathFindings = findings
+	return result, writeJSONFile(output.Artifacts.Result, result)
+}
+
 func writeJSONFile(path string, value any) error {
-	data, err := json.MarshalIndent(value, "", "  ")
+	safeValue, err := redact.DefaultRedactor().RedactJSONValue(value)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(safeValue, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -593,15 +627,98 @@ func ensureFile(path string) error {
 	return file.Close()
 }
 
-func agentLaunchWriter(output jobRunOutput, stdout io.Writer) (io.Writer, func() error, error) {
-	if output.Artifacts.AgentMessage == "" || output.AgentCapabilities.FinalOutputCapture != "stdout" {
-		return stdout, func() error { return nil }, nil
+func agentLaunchWriters(output jobRunOutput, stdout, stderr io.Writer) (io.Writer, io.Writer, func() error, error) {
+	stdoutTargets := []io.Writer{stdout}
+	var closers []io.Closer
+	if output.Artifacts.AgentMessage != "" && output.AgentCapabilities.FinalOutputCapture == "stdout" {
+		file, err := os.Create(output.Artifacts.AgentMessage)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		stdoutTargets = append(stdoutTargets, file)
+		closers = append(closers, file)
 	}
-	file, err := os.Create(output.Artifacts.AgentMessage)
+	stdoutWriter := newSanitizingWriter(stdoutTargets, closers, "agent.output")
+
+	logFile, err := os.Create(output.Artifacts.AgentLog)
 	if err != nil {
-		return nil, nil, err
+		_ = stdoutWriter.Close()
+		return nil, nil, nil, err
 	}
-	return io.MultiWriter(stdout, file), file.Close, nil
+	stderrWriter := newSanitizingWriter([]io.Writer{stderr, logFile}, []io.Closer{logFile}, "agent.log")
+	return stdoutWriter, stderrWriter, func() error {
+		errs := []error{stdoutWriter.Close(), stderrWriter.Close()}
+		for _, err := range errs {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}, nil
+}
+
+type sanitizingWriter struct {
+	buffer   bytes.Buffer
+	targets  []io.Writer
+	closers  []io.Closer
+	location string
+	closed   bool
+}
+
+func newSanitizingWriter(targets []io.Writer, closers []io.Closer, location string) *sanitizingWriter {
+	return &sanitizingWriter{targets: targets, closers: closers, location: location}
+}
+
+func (w *sanitizingWriter) Write(data []byte) (int, error) {
+	if w.closed {
+		return 0, os.ErrClosed
+	}
+	_, err := w.buffer.Write(data)
+	if err != nil {
+		return 0, err
+	}
+	return len(data), nil
+}
+
+func (w *sanitizingWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	text, _ := sanitizeReturnPathText(w.buffer.String(), w.location)
+	var firstErr error
+	if text != "" {
+		for _, target := range w.targets {
+			if _, err := io.WriteString(target, text); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	for _, closer := range w.closers {
+		if err := closer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func sanitizeAgentMessageFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	sanitized, _ := sanitizeReturnPathText(string(data), "agent.output")
+	return os.WriteFile(path, []byte(sanitized), 0o600)
+}
+
+func sanitizeReturnPathText(text, location string) (string, executor.RedactionSummary) {
+	return executor.SanitizeOutputForLocation(redact.DefaultRedactor(), text, nil, 0, 0, location)
 }
 
 func readOptionalText(path string) (string, bool) {
