@@ -109,6 +109,19 @@ func TestEvaluateMutationGate(t *testing.T) {
 	}
 }
 
+func TestEvaluateAgentMessageOnlyIsMissingEvidence(t *testing.T) {
+	now := time.Now()
+	result := Evaluate(EvaluationInput{
+		AgentMessage:         "Completed.",
+		AgentMessageExpected: true,
+		StartTime:            now,
+		EndTime:              now,
+	})
+	if result.ExitCode != ExitAgentFailure || len(result.MissingEvidence) != 1 || result.MissingEvidence[0] != "governed_action_audit" {
+		t.Fatalf("expected missing governed-action evidence, got %+v", result)
+	}
+}
+
 func TestEvaluateBudgets(t *testing.T) {
 	start := time.Now()
 	result := Evaluate(EvaluationInput{

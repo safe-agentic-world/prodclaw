@@ -37,17 +37,34 @@ Profile and bundle inputs are mutually exclusive. Invalid policy selection fails
 
 Every prepared job writes:
 
+- `job.json`
 - `job-plan.json`
+- `policy.json`
+- `policy-inputs.json`
 - `agent-launch.json`
 - `mcp-config.json`
 - `audit.jsonl`
+- `decisions.jsonl`
 - `changed-files.json`
 - `job-result.json`
+- `replay.json`
+- `artifact-manifest.json`
+- `summary.txt`
 - `agent-artifacts/`
 
 When an adapter supports final-output capture, ProdClaw also writes `agent-final-message.txt`.
 
 `job-result.json` is the machine-readable verdict. It records expected actions, observed actions, denied actions, changed files, missing evidence, budget use, exit reason, and exit code.
+
+`policy.json` and `policy-inputs.json` record the effective policy rules, policy source, source bundle hashes, and effective policy hash so a reviewer can reconstruct why a decision was made without rebuilding the repository.
+
+`artifact-manifest.json` records file size and SHA-256 for each artifact. Verify a completed artifact directory offline with:
+
+```bash
+prodclaw replay --artifact-dir .prodclaw/job
+```
+
+Replay validates the manifest, policy identity, audit and decision consistency, replay counts, and that a successful real run has governed action evidence rather than only an agent final message.
 
 ## Failure Gates
 

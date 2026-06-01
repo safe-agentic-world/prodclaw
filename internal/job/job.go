@@ -103,6 +103,7 @@ type Result struct {
 	MissingExpectedActions  []string       `json:"missing_expected_actions,omitempty"`
 	ChangedFiles            []ChangedFile  `json:"changed_files,omitempty"`
 	MissingMutationEvidence []string       `json:"missing_mutation_evidence,omitempty"`
+	MissingEvidence         []string       `json:"missing_evidence,omitempty"`
 	Budgets                 BudgetSummary  `json:"budgets"`
 	AgentFailureMarkers     []string       `json:"agent_failure_markers,omitempty"`
 	ReturnPathFindings      []scan.Finding `json:"return_path_findings,omitempty"`
@@ -256,6 +257,7 @@ func Evaluate(input EvaluationInput) Result {
 	missingMutations := missingMutationEvidence(input.ChangedFiles.Changed, input.AuditEvents)
 	budgets := budgetSummary(input)
 	markers := AgentFailureMarkers(input.AgentMessage)
+	missingEvidence := missingRuntimeEvidence(input)
 
 	result := Result{
 		ExpectedActions:         expected,
@@ -264,6 +266,7 @@ func Evaluate(input EvaluationInput) Result {
 		MissingExpectedActions:  missing,
 		ChangedFiles:            append([]ChangedFile{}, input.ChangedFiles.Changed...),
 		MissingMutationEvidence: missingMutations,
+		MissingEvidence:         missingEvidence,
 		Budgets:                 budgets,
 		AgentFailureMarkers:     markers,
 	}
@@ -293,7 +296,8 @@ func Evaluate(input EvaluationInput) Result {
 		(input.AgentMessageExpected && strings.TrimSpace(input.AgentMessage) == "") ||
 		len(markers) > 0 ||
 		len(missing) > 0 ||
-		len(missingMutations) > 0 {
+		len(missingMutations) > 0 ||
+		len(missingEvidence) > 0 {
 		result.ExitReason = ReasonAgentFailure
 		result.ExitCode = ExitAgentFailure
 		return result
@@ -301,6 +305,17 @@ func Evaluate(input EvaluationInput) Result {
 	result.ExitReason = ReasonSuccess
 	result.ExitCode = ExitSuccess
 	return result
+}
+
+func missingRuntimeEvidence(input EvaluationInput) []string {
+	switch input.Mode {
+	case ReasonDryRun, ReasonNoLaunch:
+		return nil
+	}
+	if len(input.AuditEvents) == 0 && strings.TrimSpace(input.AgentMessage) != "" {
+		return []string{"governed_action_audit"}
+	}
+	return nil
 }
 
 func AgentFailureMarkers(text string) []string {

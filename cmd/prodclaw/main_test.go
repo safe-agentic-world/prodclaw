@@ -128,6 +128,9 @@ func TestPolicyExplainIncludesDenyDetails(t *testing.T) {
 	if got.AssuranceLevel == "" || len(got.MediationCoverage) == 0 {
 		t.Fatalf("expected assurance metadata in explain output: %+v", got)
 	}
+	if got.WhyDenied == "" || got.SafeRemediationHint == "" {
+		t.Fatalf("expected incident-review denial guidance, got %+v", got)
+	}
 }
 
 func TestPolicyCheckMissingBundleFailsClosed(t *testing.T) {
@@ -582,7 +585,7 @@ func TestJobRunRealLaunchUsesVerifiedAgentPlan(t *testing.T) {
 						return err
 					}
 				}
-				return nil
+				return writeAuditEvent(mcpArgValue(plan, "--audit"), successfulAuditEvent("run_command", "process.exec", "file://workspace/"))
 			}
 			discoverJobAgentVersion = func(agentkit.Builder) string { return agentName + " version" }
 			t.Cleanup(func() {
@@ -615,6 +618,31 @@ func TestJobRunRealLaunchUsesVerifiedAgentPlan(t *testing.T) {
 	}
 }
 
+func TestJobRunAgentMessageOnlyFailsWithoutGovernedEvidence(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	workspace := t.TempDir()
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	restore := stubSuccessfulLaunch(t, nil)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{
+		"run",
+		"--agent", "codex",
+		"--task", taskPath,
+		"--workspace", workspace,
+	}, &stdout, &stderr)
+	if code != jobkit.ExitAgentFailure {
+		t.Fatalf("job run exit code = %d, want %d; stderr=%s", code, jobkit.ExitAgentFailure, stderr.String())
+	}
+	result := readLatestJobResult(t, workspace)
+	if len(result.MissingEvidence) != 1 || result.MissingEvidence[0] != "governed_action_audit" {
+		t.Fatalf("expected missing governed action evidence, got %+v", result)
+	}
+}
+
 func TestJobRunDryRunWritesRequiredArtifacts(t *testing.T) {
 	taskPath := filepath.Join(t.TempDir(), "task.md")
 	workspace := t.TempDir()
@@ -640,12 +668,19 @@ func TestJobRunDryRunWritesRequiredArtifacts(t *testing.T) {
 		t.Fatalf("decode output: %v\n%s", err, stdout.String())
 	}
 	for _, path := range []string{
+		got.Artifacts.Job,
 		got.Artifacts.Plan,
+		got.Artifacts.Policy,
+		got.Artifacts.PolicyInputs,
 		got.Artifacts.Launch,
 		got.Artifacts.MCPConfig,
 		got.Artifacts.Audit,
+		got.Artifacts.Decisions,
 		got.Artifacts.ChangedFiles,
 		got.Artifacts.Result,
+		got.Artifacts.Replay,
+		got.Artifacts.Manifest,
+		got.Artifacts.Summary,
 		got.LaunchPlan.MCPConfigPath,
 	} {
 		if _, err := os.Stat(path); err != nil {
@@ -659,6 +694,27 @@ func TestJobRunDryRunWritesRequiredArtifacts(t *testing.T) {
 	readJSONFile(t, got.Artifacts.Result, &result)
 	if result.ExitReason != jobkit.ReasonDryRun || result.ExitCode != jobkit.ExitSuccess {
 		t.Fatalf("unexpected dry-run result: %+v", result)
+	}
+	var replayStdout, replayStderr bytes.Buffer
+	replayCode := runReplay([]string{"--artifact-dir", artifactDir, "--format", "json"}, &replayStdout, &replayStderr)
+	if replayCode != jobkit.ExitSuccess {
+		t.Fatalf("replay exit code = %d, want %d; stdout=%s stderr=%s", replayCode, jobkit.ExitSuccess, replayStdout.String(), replayStderr.String())
+	}
+	var replay replayReport
+	if err := json.Unmarshal(replayStdout.Bytes(), &replay); err != nil {
+		t.Fatalf("decode replay report: %v\n%s", err, replayStdout.String())
+	}
+	if !replay.Valid || replay.ManifestFiles == 0 {
+		t.Fatalf("expected valid replay report, got %+v", replay)
+	}
+	if err := os.WriteFile(got.Artifacts.Summary, []byte("tampered\n"), 0o600); err != nil {
+		t.Fatalf("tamper summary: %v", err)
+	}
+	replayStdout.Reset()
+	replayStderr.Reset()
+	replayCode = runReplay([]string{"--artifact-dir", artifactDir}, &replayStdout, &replayStderr)
+	if replayCode != jobkit.ExitRuntimeGuaranteeFailure || !strings.Contains(replayStdout.String(), "sha256 mismatch") {
+		t.Fatalf("expected replay manifest failure, code=%d stdout=%s stderr=%s", replayCode, replayStdout.String(), replayStderr.String())
 	}
 }
 

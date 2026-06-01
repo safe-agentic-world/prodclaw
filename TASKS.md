@@ -884,27 +884,27 @@ Nomos reference: check `../nomos` for reusable code, tests, or docs patterns; co
 
 Deliverables:
 
-- [ ] `job.json`.
-- [ ] `policy.json`.
-- [ ] `policy-inputs.json`.
-- [ ] `audit.jsonl`.
-- [ ] `decisions.jsonl`.
-- [ ] `agent-launch.json`.
-- [ ] `changed-files.json`.
-- [ ] `job-result.json`.
-- [ ] `replay.json`.
-- [ ] optional hash chain or artifact manifest for detecting accidental artifact corruption.
-- [ ] `prodclaw replay --artifact-dir <path>` or equivalent offline verifier.
-- [ ] policy explain output with why-denied, matched rule source, safe remediation hint, and obligations summary.
-- [ ] CI-friendly summary that highlights allowed actions, denied actions, budget use, changed files, and missing evidence.
+- [x] `job.json`.
+- [x] `policy.json`.
+- [x] `policy-inputs.json`.
+- [x] `audit.jsonl`.
+- [x] `decisions.jsonl`.
+- [x] `agent-launch.json`.
+- [x] `changed-files.json`.
+- [x] `job-result.json`.
+- [x] `replay.json`.
+- [x] optional hash chain or artifact manifest for detecting accidental artifact corruption.
+- [x] `prodclaw replay --artifact-dir <path>` or equivalent offline verifier.
+- [x] policy explain output with why-denied, matched rule source, safe remediation hint, and obligations summary.
+- [x] CI-friendly summary that highlights allowed actions, denied actions, budget use, changed files, and missing evidence.
 
 Acceptance:
 
-- [ ] A reviewer can determine which policy inputs produced a decision without rebuilding the repo.
-- [ ] Offline replay verifies decisions from artifacts and fails when policy identity or action evidence is missing.
-- [ ] Denied actions explain the safe policy gap without exposing secrets or sensitive policy internals.
-- [ ] The artifact manifest or hash chain detects accidental artifact corruption.
-- [ ] Job success never depends only on the agent final message.
+- [x] A reviewer can determine which policy inputs produced a decision without rebuilding the repo.
+- [x] Offline replay verifies decisions from artifacts and fails when policy identity or action evidence is missing.
+- [x] Denied actions explain the safe policy gap without exposing secrets or sensitive policy internals.
+- [x] The artifact manifest or hash chain detects accidental artifact corruption.
+- [x] Job success never depends only on the agent final message.
 
 ## M17 - CI Examples And Smoke Workflows
 

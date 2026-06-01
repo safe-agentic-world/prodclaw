@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/safe-agentic-world/prodclaw/internal/action"
@@ -46,6 +47,8 @@ func run(args []string) int {
 		return runJob(args[1:], os.Stdout, os.Stderr)
 	case "doctor":
 		return runDoctor(args[1:], os.Stdout, os.Stderr)
+	case "replay":
+		return runReplay(args[1:], os.Stdout, os.Stderr)
 	case "-h", "--help", "help":
 		printHelp()
 		return 0
@@ -66,6 +69,7 @@ func printHelp() {
 	fmt.Fprintln(os.Stderr, "  mcp        start governed MCP stdio server")
 	fmt.Fprintln(os.Stderr, "  job        run a governed CI job")
 	fmt.Fprintln(os.Stderr, "  doctor     check runtime hardening")
+	fmt.Fprintln(os.Stderr, "  replay     verify job artifacts offline")
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) int {
@@ -514,8 +518,11 @@ type policyExplainOutput struct {
 	DenyRules             []policy.DeniedRuleExplanation  `json:"deny_rules"`
 	AllowRuleIDs          []string                        `json:"allow_rule_ids"`
 	ObligationsPreview    map[string]any                  `json:"obligations_preview"`
+	ObligationsSummary    []string                        `json:"obligations_summary"`
 	ExecAuthorization     policy.ExecAuthorizationSummary `json:"exec_authorization"`
 	MatchedRuleProvenance []policy.MatchedRuleProvenance  `json:"matched_rule_provenance"`
+	WhyDenied             string                          `json:"why_denied,omitempty"`
+	SafeRemediationHint   string                          `json:"safe_remediation_hint,omitempty"`
 	AssuranceLevel        string                          `json:"assurance_level"`
 	MediationCoverage     []doctor.Coverage               `json:"mediation_coverage"`
 }
@@ -574,11 +581,65 @@ func evaluatePolicy(opts policyEvalOptions) (any, error) {
 		DenyRules:             details.DenyRules,
 		AllowRuleIDs:          details.AllowRuleIDs,
 		ObligationsPreview:    details.ObligationsPreview,
+		ObligationsSummary:    summarizeObligations(details.Decision.Obligations),
 		ExecAuthorization:     details.ExecAuthorization,
 		MatchedRuleProvenance: details.MatchedRuleProvenance,
+		WhyDenied:             whyDenied(details),
+		SafeRemediationHint:   safeRemediationHint(details),
 		AssuranceLevel:        assuranceLevel,
 		MediationCoverage:     mediationCoverage,
 	}, nil
+}
+
+func whyDenied(details policy.ExplainDetails) string {
+	if details.Decision.Decision != policy.DecisionDeny {
+		return ""
+	}
+	switch details.Decision.ReasonCode {
+	case "deny_by_rule":
+		if len(details.Decision.MatchedRuleIDs) == 0 {
+			return "The action matched an explicit deny rule."
+		}
+		return "The action matched explicit deny rule(s): " + strings.Join(details.Decision.MatchedRuleIDs, ", ")
+	case "deny_by_default":
+		return "No allow rule matched the normalized action, so default-deny policy blocked it."
+	case "deny_by_exec_model_conflict":
+		return "Matching process rules use conflicting execution models, so ProdClaw failed closed."
+	default:
+		return "ProdClaw denied the action with reason code " + details.Decision.ReasonCode + "."
+	}
+}
+
+func safeRemediationHint(details policy.ExplainDetails) string {
+	if details.Decision.Decision != policy.DecisionDeny {
+		return ""
+	}
+	switch details.Decision.ReasonCode {
+	case "deny_by_default":
+		return "Add a narrow allow rule in the appropriate policy layer for this normalized action, principal, agent, and environment."
+	case "deny_by_rule":
+		return "Keep the deny unless this action is intentional; change the explicit policy layer that owns the matched deny rule and prefer a narrower allow path."
+	case "deny_by_exec_model_conflict":
+		return "Use one process authorization model for the matching rules, preferably exec_match argv patterns."
+	default:
+		return "Review the matched rule provenance and update only the policy layer that owns the intended exception."
+	}
+}
+
+func summarizeObligations(obligations map[string]any) []string {
+	if len(obligations) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(obligations))
+	for key := range obligations {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key)
+	}
+	return out
 }
 
 func writeJSON(w io.Writer, value any) error {

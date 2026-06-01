@@ -13,6 +13,7 @@ import (
 	"time"
 
 	agentkit "github.com/safe-agentic-world/prodclaw/internal/agent"
+	"github.com/safe-agentic-world/prodclaw/internal/audit"
 	runtimeconfig "github.com/safe-agentic-world/prodclaw/internal/config"
 	"github.com/safe-agentic-world/prodclaw/internal/doctor"
 	"github.com/safe-agentic-world/prodclaw/internal/executor"
@@ -55,12 +56,19 @@ type jobRunOutput struct {
 }
 
 type jobArtifactPaths struct {
+	Job            string `json:"job"`
 	Plan           string `json:"job_plan"`
+	Policy         string `json:"policy"`
+	PolicyInputs   string `json:"policy_inputs"`
 	Launch         string `json:"agent_launch"`
 	MCPConfig      string `json:"mcp_config"`
 	Audit          string `json:"audit"`
+	Decisions      string `json:"decisions"`
 	ChangedFiles   string `json:"changed_files"`
 	Result         string `json:"job_result"`
+	Replay         string `json:"replay"`
+	Manifest       string `json:"artifact_manifest"`
+	Summary        string `json:"summary"`
 	AgentMessage   string `json:"agent_message,omitempty"`
 	AgentLog       string `json:"agent_log,omitempty"`
 	AgentArtifacts string `json:"agent_artifacts"`
@@ -302,7 +310,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	if !dryRun {
 		output.AgentVersion = discoverJobAgentVersion(adapter)
 	}
-	if err := writePreparedJobArtifacts(output); err != nil {
+	if err := writePreparedJobArtifacts(output, selection); err != nil {
 		fmt.Fprintf(stderr, "job run: prepare artifacts: %v\n", err)
 		return jobkit.ExitInternalError
 	}
@@ -337,7 +345,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 			EndTime:         start,
 			BudgetLimits:    budgetLimits,
 		})
-		result, err = finalizeJobArtifacts(output, changed, result)
+		result, err = finalizeJobArtifacts(output, changed, nil, result)
 		if err != nil {
 			fmt.Fprintf(stderr, "job run: write artifacts: %v\n", err)
 			return jobkit.ExitInternalError
@@ -381,7 +389,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		EndTime:              end,
 		BudgetLimits:         budgetLimits,
 	})
-	result, err = finalizeJobArtifacts(output, changed, result)
+	result, err = finalizeJobArtifacts(output, changed, auditEvents, result)
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: write artifacts: %v\n", err)
 		return jobkit.ExitInternalError
@@ -546,12 +554,19 @@ func resolveJobArtifactDir(workspace, raw string) (string, error) {
 
 func newJobArtifactPaths(dir string) jobArtifactPaths {
 	return jobArtifactPaths{
+		Job:            filepath.Join(dir, "job.json"),
 		Plan:           filepath.Join(dir, "job-plan.json"),
+		Policy:         filepath.Join(dir, "policy.json"),
+		PolicyInputs:   filepath.Join(dir, "policy-inputs.json"),
 		Launch:         filepath.Join(dir, "agent-launch.json"),
 		MCPConfig:      filepath.Join(dir, "mcp-config.json"),
 		Audit:          filepath.Join(dir, "audit.jsonl"),
+		Decisions:      filepath.Join(dir, "decisions.jsonl"),
 		ChangedFiles:   filepath.Join(dir, "changed-files.json"),
 		Result:         filepath.Join(dir, "job-result.json"),
+		Replay:         filepath.Join(dir, "replay.json"),
+		Manifest:       filepath.Join(dir, "artifact-manifest.json"),
+		Summary:        filepath.Join(dir, "summary.txt"),
 		AgentLog:       filepath.Join(dir, "agent-stderr.txt"),
 		AgentArtifacts: filepath.Join(dir, "agent-artifacts"),
 	}
@@ -605,14 +620,23 @@ func probeJobTools(bundle policy.Bundle, workspace, artifactDir, auditPath strin
 	return server.AdvertisedToolNames(), nil
 }
 
-func writePreparedJobArtifacts(output jobRunOutput) error {
+func writePreparedJobArtifacts(output jobRunOutput, selection loadedPolicy) error {
 	if err := os.MkdirAll(output.Artifacts.AgentArtifacts, 0o700); err != nil {
 		return err
 	}
 	if err := ensureFile(output.Artifacts.AgentLog); err != nil {
 		return err
 	}
+	if err := writeJSONFile(output.Artifacts.Job, output); err != nil {
+		return err
+	}
 	if err := writeJSONFile(output.Artifacts.Plan, output); err != nil {
+		return err
+	}
+	if err := writeJSONFile(output.Artifacts.Policy, newPolicyArtifact(selection)); err != nil {
+		return err
+	}
+	if err := writeJSONFile(output.Artifacts.PolicyInputs, newPolicyInputsArtifact(selection)); err != nil {
 		return err
 	}
 	if err := writeJSONFile(output.Artifacts.Launch, output.LaunchPlan); err != nil {
@@ -624,7 +648,10 @@ func writePreparedJobArtifacts(output jobRunOutput) error {
 	if err := writeGeneratedMCPConfig(output.LaunchPlan.MCPConfigPath, output.LaunchPlan.MCPConfig); err != nil {
 		return err
 	}
-	return ensureFile(output.Artifacts.Audit)
+	if err := ensureFile(output.Artifacts.Audit); err != nil {
+		return err
+	}
+	return ensureFile(output.Artifacts.Decisions)
 }
 
 func writeFinalJobArtifacts(output jobRunOutput, changed jobkit.ChangedFilesSummary, result jobkit.Result) error {
@@ -634,7 +661,7 @@ func writeFinalJobArtifacts(output jobRunOutput, changed jobkit.ChangedFilesSumm
 	return writeJSONFile(output.Artifacts.Result, result)
 }
 
-func finalizeJobArtifacts(output jobRunOutput, changed jobkit.ChangedFilesSummary, result jobkit.Result) (jobkit.Result, error) {
+func finalizeJobArtifacts(output jobRunOutput, changed jobkit.ChangedFilesSummary, auditEvents []audit.Event, result jobkit.Result) (jobkit.Result, error) {
 	if err := writeFinalJobArtifacts(output, changed, result); err != nil {
 		return result, err
 	}
@@ -643,12 +670,35 @@ func finalizeJobArtifacts(output jobRunOutput, changed jobkit.ChangedFilesSummar
 		return result, err
 	}
 	if len(findings) == 0 {
-		return result, nil
+		return result, writeEvidenceArtifacts(output, changed, auditEvents, result)
 	}
 	result.ExitReason = jobkit.ReasonReturnPathViolation
 	result.ExitCode = jobkit.ExitInternalError
 	result.ReturnPathFindings = findings
-	return result, writeJSONFile(output.Artifacts.Result, result)
+	if err := writeJSONFile(output.Artifacts.Result, result); err != nil {
+		return result, err
+	}
+	return result, writeEvidenceArtifacts(output, changed, auditEvents, result)
+}
+
+func writeEvidenceArtifacts(output jobRunOutput, changed jobkit.ChangedFilesSummary, auditEvents []audit.Event, result jobkit.Result) error {
+	if auditEvents == nil {
+		var err error
+		auditEvents, err = jobkit.ReadAuditEvents(output.Artifacts.Audit)
+		if err != nil {
+			return err
+		}
+	}
+	if err := writeDecisionStream(output.Artifacts.Decisions, auditEvents); err != nil {
+		return err
+	}
+	if err := writeJSONFile(output.Artifacts.Replay, newReplayArtifact(output, changed, auditEvents, result)); err != nil {
+		return err
+	}
+	if err := writeSummaryArtifact(output.Artifacts.Summary, output, result, auditEvents); err != nil {
+		return err
+	}
+	return writeArtifactManifest(output.ArtifactDir, output.Artifacts.Manifest)
 }
 
 func writeJSONFile(path string, value any) error {
@@ -784,9 +834,6 @@ func readOptionalText(path string) (string, bool) {
 }
 
 func writeJobSummary(out io.Writer, output jobRunOutput, result jobkit.Result) {
-	_, _ = fmt.Fprintln(out, "ProdClaw job complete")
-	_, _ = fmt.Fprintf(out, "Agent:       %s\n", output.Agent)
-	_, _ = fmt.Fprintf(out, "Artifacts:   %s\n", output.ArtifactDir)
-	_, _ = fmt.Fprintf(out, "Exit reason: %s\n", result.ExitReason)
-	_, _ = fmt.Fprintf(out, "Exit code:   %d\n", result.ExitCode)
+	events, _ := jobkit.ReadAuditEvents(output.Artifacts.Audit)
+	_, _ = fmt.Fprint(out, buildJobSummaryText(output, result, events))
 }
