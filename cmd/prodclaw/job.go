@@ -464,8 +464,20 @@ func launchPlannedAgent(plan agentkit.LaunchPlan, stdout, stderr io.Writer) erro
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = append(os.Environ(), plan.Env...)
+	cmd.Env = agentProcessEnvironment(plan.Env)
 	return cmd.Run()
+}
+
+func agentProcessEnvironment(planEnv []string) []string {
+	env := identity.AgentEnvironment(os.LookupEnv, nil)
+	for _, entry := range planEnv {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || identity.SensitiveEnvKey(key) {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
 }
 
 func resolveJobWorkspace(raw string) (string, error) {

@@ -1,0 +1,15 @@
+.git
+.github
+.prodclaw
+.gocache
+.gomodcache
+.gotmp
+artifacts
+coverage.*
+*.coverprofile
+*.out
+*.test
+prodclaw
+prodclaw.exe
+tmp
+temp

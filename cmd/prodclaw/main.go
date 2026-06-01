@@ -12,6 +12,7 @@ import (
 
 	"github.com/safe-agentic-world/prodclaw/internal/action"
 	runtimeconfig "github.com/safe-agentic-world/prodclaw/internal/config"
+	"github.com/safe-agentic-world/prodclaw/internal/doctor"
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
 	"github.com/safe-agentic-world/prodclaw/internal/logging"
 	"github.com/safe-agentic-world/prodclaw/internal/mcp"
@@ -43,6 +44,8 @@ func run(args []string) int {
 		return runMCP(args[1:], os.Stdin, os.Stdout, os.Stderr)
 	case "job":
 		return runJob(args[1:], os.Stdout, os.Stderr)
+	case "doctor":
+		return runDoctor(args[1:], os.Stdout, os.Stderr)
 	case "-h", "--help", "help":
 		printHelp()
 		return 0
@@ -62,6 +65,66 @@ func printHelp() {
 	fmt.Fprintln(os.Stderr, "  profiles   inspect built-in profiles")
 	fmt.Fprintln(os.Stderr, "  mcp        start governed MCP stdio server")
 	fmt.Fprintln(os.Stderr, "  job        run a governed CI job")
+	fmt.Fprintln(os.Stderr, "  doctor     check runtime hardening")
+}
+
+func runDoctor(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var mode string
+	var workspace string
+	var artifactDir string
+	var format string
+	fs.StringVar(&mode, "mode", "container", "doctor mode: container")
+	fs.StringVar(&workspace, "workspace", "", "workspace mount path")
+	fs.StringVar(&artifactDir, "artifact-dir", "", "artifact mount path")
+	fs.StringVar(&format, "format", "text", "output format: text|json")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage:")
+		fmt.Fprintln(stderr, "  prodclaw doctor --mode container [--workspace <path>] [--artifact-dir <path>] [--format text|json]")
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "doctor: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	report, err := doctor.Run(doctor.Options{Mode: mode, Workspace: workspace, ArtifactDir: artifactDir, LookupEnv: os.LookupEnv})
+	if err != nil {
+		fmt.Fprintf(stderr, "doctor: %v\n", err)
+		return 30
+	}
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "text":
+		printDoctorReport(stdout, report)
+	case "json":
+		if err := writeJSON(stdout, report); err != nil {
+			fmt.Fprintf(stderr, "doctor: write output: %v\n", err)
+			return 50
+		}
+	default:
+		fmt.Fprintln(stderr, "doctor: --format must be text or json")
+		return 30
+	}
+	if !report.StrongEnforcement {
+		return 40
+	}
+	return 0
+}
+
+func printDoctorReport(w io.Writer, report doctor.Report) {
+	fmt.Fprintf(w, "Mode: %s\n", report.Mode)
+	fmt.Fprintf(w, "Workspace: %s\n", report.Workspace)
+	fmt.Fprintf(w, "Artifacts: %s\n", report.ArtifactDir)
+	for _, check := range report.Checks {
+		fmt.Fprintf(w, "%-24s %-4s %s\n", check.ID, strings.ToUpper(check.Status), check.Message)
+	}
+	if report.StrongEnforcement {
+		fmt.Fprintf(w, "Strong enforcement claim: %s\n", report.StrongEnforcementClaim)
+	} else {
+		fmt.Fprintln(w, "Strong enforcement: unavailable")
+	}
 }
 
 func runMCP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {

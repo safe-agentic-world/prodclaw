@@ -411,6 +411,43 @@ func TestJobRunControlledCIFailsWithoutSupportedIdentity(t *testing.T) {
 	}
 }
 
+func TestDoctorContainerDoesNotPrintStrongClaimWhenChecksFail(t *testing.T) {
+	t.Setenv("PRODCLAW_CONTAINER", "true")
+	t.Setenv("PRODCLAW_EGRESS_BLOCKED", "")
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runDoctor([]string{
+		"--mode", "container",
+		"--workspace", workspace,
+		"--artifact-dir", filepath.Join(dir, "artifacts"),
+	}, &stdout, &stderr)
+	if code != jobkit.ExitRuntimeGuaranteeFailure {
+		t.Fatalf("doctor exit code = %d, want %d; stderr=%s", code, jobkit.ExitRuntimeGuaranteeFailure, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Strong enforcement claim:") {
+		t.Fatalf("doctor printed strong claim despite failed checks:\n%s", stdout.String())
+	}
+}
+
+func TestAgentProcessEnvironmentUsesAllowlist(t *testing.T) {
+	t.Setenv("PATH", "safe-path")
+	t.Setenv("HOME", "safe-home")
+	t.Setenv("GITHUB_TOKEN", "raw-token")
+	t.Setenv("CUSTOM_ALLOWED", "allowed")
+	env := agentProcessEnvironment([]string{"CUSTOM_ALLOWED=plan-value", "GITHUB_TOKEN=plan-token"})
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "PATH=safe-path") || !strings.Contains(joined, "HOME=safe-home") || !strings.Contains(joined, "CUSTOM_ALLOWED=plan-value") {
+		t.Fatalf("expected safe allowlist and non-sensitive plan env, got %q", joined)
+	}
+	if strings.Contains(joined, "raw-token") || strings.Contains(joined, "plan-token") || strings.Contains(joined, "GITHUB_TOKEN=") {
+		t.Fatalf("sensitive env leaked to agent process: %q", joined)
+	}
+}
+
 func TestJobRunDryRunSupportsClaudeWithSharedMetadataShape(t *testing.T) {
 	taskPath := filepath.Join(t.TempDir(), "task.md")
 	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {

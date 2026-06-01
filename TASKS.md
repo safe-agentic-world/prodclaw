@@ -828,24 +828,24 @@ Nomos reference: check `../nomos` for reusable code, tests, or docs patterns; co
 
 Deliverables:
 
-- [ ] official Dockerfile.
-- [ ] image entrypoint for `prodclaw job run`.
-- [ ] image variant or documented install path for Codex.
-- [ ] image variant or documented install path for Claude Code.
-- [ ] non-root runtime user where possible.
-- [ ] workspace mount contract.
-- [ ] artifact mount contract.
-- [ ] egress-blocking guidance for GitHub Actions and GitLab CI.
-- [ ] environment variable allowlist for agent processes.
-- [ ] doctor checks for container hardening.
+- [x] official Dockerfile.
+- [x] image entrypoint for `prodclaw job run`.
+- [x] image variant or documented install path for Codex.
+- [x] image variant or documented install path for Claude Code.
+- [x] non-root runtime user where possible.
+- [x] workspace mount contract.
+- [x] artifact mount contract.
+- [x] egress-blocking guidance for GitHub Actions and GitLab CI.
+- [x] environment variable allowlist for agent processes.
+- [x] doctor checks for container hardening.
 
 Acceptance:
 
-- [ ] Docker image can run `prodclaw version`.
-- [ ] Docker image can run `prodclaw job run --dry-run`.
-- [ ] Docker image can run policy checks against mounted policy files.
-- [ ] Container docs show how to prevent direct credential and network bypass.
-- [ ] Strong-enforcement claims are only printed when doctor checks pass.
+- [x] Docker image can run `prodclaw version`.
+- [x] Docker image can run `prodclaw job run --dry-run`.
+- [x] Docker image can run policy checks against mounted policy files.
+- [x] Container docs show how to prevent direct credential and network bypass.
+- [x] Strong-enforcement claims are only printed when doctor checks pass.
 
 ## M15 - Controlled Runtime Proof And Guarantees Matrix
 

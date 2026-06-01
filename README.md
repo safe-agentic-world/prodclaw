@@ -76,6 +76,29 @@ prodclaw job run --agent codex --task task.md --policy-bundle ./policy/prodclaw.
 
 See `docs/default-profiles.md` for the default-profile contract and the replacement path.
 
+## Docker Runtime
+
+Build the CI container locally:
+
+```bash
+docker build -t prodclaw:local .
+docker run --rm prodclaw:local version
+```
+
+The image entrypoint defaults shorthand flags to `prodclaw job run` with `/workspace` and `/artifacts` mounts:
+
+```bash
+docker run --rm \
+  -v "$PWD:/workspace" \
+  -v "$PWD/artifacts/prodclaw:/artifacts" \
+  prodclaw:local \
+  --agent codex \
+  --task /workspace/task.md \
+  --dry-run
+```
+
+See `docs/docker-runtime.md` for the mount contract, optional Codex and Claude Code install build args, egress-blocking guidance, and `prodclaw doctor --mode container`.
+
 ## Run As An MCP Boundary
 
 ```bash
