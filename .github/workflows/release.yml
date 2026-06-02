@@ -157,7 +157,7 @@ jobs:
       - name: Update Homebrew and Scoop manifests
         if: ${{ github.event_name == 'repository_dispatch' }}
         env:
-          PACKAGES_REPO_TOKEN: ${{ secrets.PACKAGES_REPO_TOKEN }}
+          PACKAGES_REPO_TOKEN: ${{ secrets.prodclaw_packages }}
           HOMEBREW_REPO: safe-agentic-world/homebrew-prodclaw
           SCOOP_REPO: safe-agentic-world/scoop-prodclaw
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}

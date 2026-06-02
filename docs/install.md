@@ -45,7 +45,7 @@ Verify archives before use with [Release Verification](release-verification.md).
 
 ## Homebrew And Scoop Handoff
 
-The release workflow can update these package repositories when `PACKAGES_REPO_TOKEN` is configured:
+The release workflow can update these package repositories when the GitHub secret `prodclaw_packages` is configured. The workflow passes that secret to the package-update script as `PACKAGES_REPO_TOKEN`.
 
 - `safe-agentic-world/homebrew-prodclaw`
 - `safe-agentic-world/scoop-prodclaw`
