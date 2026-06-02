@@ -36,6 +36,12 @@ func run(args []string) int {
 	switch args[0] {
 	case "version":
 		fmt.Printf("version=%s\n", version.Version)
+		if strings.TrimSpace(version.Commit) != "" {
+			fmt.Printf("commit=%s\n", version.Commit)
+		}
+		if strings.TrimSpace(version.BuildDate) != "" {
+			fmt.Printf("build_date=%s\n", version.BuildDate)
+		}
 		return 0
 	case "policy":
 		return runPolicy(args[1:], os.Stdout, os.Stderr)

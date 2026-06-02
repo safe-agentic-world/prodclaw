@@ -47,7 +47,12 @@ For the MVP, install from source with Go:
 go install github.com/safe-agentic-world/prodclaw/cmd/prodclaw@latest
 ```
 
-Versioned binaries are published from GitHub tags. Create a tag like `v0.1.0` to build Linux, macOS, and Windows artifacts with SHA256 checksums.
+Versioned binaries are published from GitHub tags. Create a tag like `v0.1.0` to build Linux, macOS, and Windows artifacts with SHA256 checksums, Sigstore signatures, an SPDX SBOM, and release provenance.
+
+See:
+
+- [Installation](docs/install.md)
+- [Release Verification](docs/release-verification.md)
 
 ## Try Policy Checks
 

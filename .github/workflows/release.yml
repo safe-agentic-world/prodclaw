@@ -12,7 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -20,20 +20,15 @@ concurrency:
 
 jobs:
   release:
-    name: Build Release Artifacts
+    name: Build And Publish Release
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
       - name: Resolve Version
         id: version
         shell: bash
@@ -50,57 +45,126 @@ jobs:
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
+      - name: Checkout Release Ref
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ steps.version.outputs.version }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Test
         run: go test ./...
 
-      - name: Build Artifacts
+      - name: Vulnerability Scan
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          mkdir -p dist
-          targets=(
-            "linux amd64"
-            "linux arm64"
-            "darwin amd64"
-            "darwin arm64"
-            "windows amd64"
-          )
-          for target in "${targets[@]}"; do
-            read -r goos goarch <<< "${target}"
-            name="prodclaw_${version}_${goos}_${goarch}"
-            binary="prodclaw"
-            if [[ "${goos}" == "windows" ]]; then
-              binary="prodclaw.exe"
-            fi
-            outdir="dist/${name}"
-            mkdir -p "${outdir}"
-            GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build \
-              -trimpath \
-              -ldflags "-s -w -X github.com/safe-agentic-world/prodclaw/internal/version.Version=${version}" \
-              -o "${outdir}/${binary}" \
-              ./cmd/prodclaw
-            cp README.md LICENSE "${outdir}/"
-            if [[ "${goos}" == "windows" ]]; then
-              (cd dist && zip -qr "${name}.zip" "${name}")
-            else
-              tar -C dist -czf "dist/${name}.tar.gz" "${name}"
-            fi
-            rm -rf "${outdir}"
+          mkdir -p "${RUNNER_TEMP}/release-tools"
+          GOBIN="${RUNNER_TEMP}/release-tools" go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "${RUNNER_TEMP}/release-tools/govulncheck" ./...
+
+      - name: Build Release Archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run ./scripts/release \
+            --mode build \
+            --version "${{ steps.version.outputs.version }}" \
+            --dist dist
+
+      - name: Install Supply-Chain Tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOLS_BIN="${RUNNER_TEMP}/release-tools"
+          mkdir -p "${TOOLS_BIN}"
+          GOBIN="${TOOLS_BIN}" go install github.com/anchore/syft/cmd/syft@v1.24.0
+          GOBIN="${TOOLS_BIN}" go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+          echo "TOOLS_BIN=${TOOLS_BIN}" >> "${GITHUB_ENV}"
+
+      - name: Generate SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${TOOLS_BIN}/syft" packages dir:dist -o spdx-json > dist/prodclaw-sbom.spdx.json
+
+      - name: Generate Provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run ./scripts/release \
+            --mode provenance \
+            --version "${{ steps.version.outputs.version }}" \
+            --dist dist \
+            --repository "${{ github.repository }}" \
+            --workflow ".github/workflows/release.yml" \
+            --run-id "${{ github.run_id }}" \
+            --go-version "$(go env GOVERSION)"
+
+      - name: Sign Release Assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in \
+            dist/prodclaw-*.tar.gz \
+            dist/prodclaw-*.zip \
+            dist/prodclaw-checksums.txt \
+            dist/prodclaw-sbom.spdx.json \
+            dist/prodclaw-provenance.intoto.jsonl; do
+            "${TOOLS_BIN}/cosign" sign-blob --yes \
+              --output-signature "${file}.sig" \
+              --output-certificate "${file}.pem" \
+              "${file}"
           done
-          (cd dist && sha256sum * > checksums.txt)
+
+      - name: Verify Required Trust Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            prodclaw-linux-amd64.tar.gz
+            prodclaw-linux-arm64.tar.gz
+            prodclaw-darwin-amd64.tar.gz
+            prodclaw-darwin-arm64.tar.gz
+            prodclaw-windows-amd64.zip
+            prodclaw-windows-arm64.zip
+            prodclaw-checksums.txt
+            prodclaw-sbom.spdx.json
+            prodclaw-provenance.intoto.jsonl
+          )
+          for asset in "${required[@]}"; do
+            test -s "dist/${asset}"
+            test -s "dist/${asset}.sig"
+            test -s "dist/${asset}.pem"
+          done
 
       - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2.5.0
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: dist/*
+          generate_release_notes: true
+
+      - name: Update Homebrew And Scoop Manifests
         env:
-          GH_TOKEN: ${{ github.token }}
+          PACKAGES_REPO_TOKEN: ${{ secrets.PACKAGES_REPO_TOKEN }}
+          HOMEBREW_REPO: safe-agentic-world/homebrew-prodclaw
+          SCOOP_REPO: safe-agentic-world/scoop-prodclaw
+          RELEASE_TAG: ${{ steps.version.outputs.version }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          CHECKSUM_FILE: ${{ github.workspace }}/dist/prodclaw-checksums.txt
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          if gh release view "${version}" >/dev/null 2>&1; then
-            gh release upload "${version}" dist/* --clobber
-          else
-            gh release create "${version}" dist/* \
-              --title "ProdClaw ${version}" \
-              --notes "ProdClaw ${version} release artifacts and SHA256 checksums."
+          if [[ -z "${PACKAGES_REPO_TOKEN:-}" ]]; then
+            echo "::warning::PACKAGES_REPO_TOKEN is not set; skipping Homebrew/Scoop manifest update."
+            exit 0
+          fi
+          if ! bash ./scripts/update-packages-repo.sh; then
+            echo "::warning::package repo update failed; release was published, but Homebrew/Scoop manifests were not updated"
           fi

@@ -978,21 +978,21 @@ Nomos reference: check `../nomos` for reusable code, tests, or docs patterns; co
 
 Deliverables:
 
-- [ ] reproducible release workflow for Linux, macOS, and Windows binaries where practical.
-- [ ] checksums for release archives and binaries.
-- [ ] signed release artifacts or documented verification mechanism.
-- [ ] SBOM for release binaries.
-- [ ] build provenance/attestation showing source revision and workflow identity.
-- [ ] vulnerability scan in release workflow.
-- [ ] documented `go install github.com/safe-agentic-world/prodclaw/cmd/prodclaw@latest` path.
-- [ ] future package-manager handoff notes for Homebrew/Scoop repos without blocking MVP.
+- [x] reproducible release workflow for Linux, macOS, and Windows binaries where practical.
+- [x] checksums for release archives and binaries.
+- [x] signed release artifacts or documented verification mechanism.
+- [x] SBOM for release binaries.
+- [x] build provenance/attestation showing source revision and workflow identity.
+- [x] vulnerability scan in release workflow.
+- [x] documented `go install github.com/safe-agentic-world/prodclaw/cmd/prodclaw@latest` path.
+- [x] future package-manager handoff notes for Homebrew/Scoop repos without blocking MVP.
 
 Acceptance:
 
-- [ ] Users can verify official release artifacts with documented steps.
-- [ ] Each official release publishes checksums, SBOM, and provenance/attestation artifacts.
-- [ ] Release automation fails if trust artifacts are missing.
-- [ ] Installation docs avoid asking users to clone source for normal CI use.
+- [x] Users can verify official release artifacts with documented steps.
+- [x] Each official release publishes checksums, SBOM, and provenance/attestation artifacts.
+- [x] Release automation fails if trust artifacts are missing.
+- [x] Installation docs avoid asking users to clone source for normal CI use.
 
 ## M20 - MVP Release Gate
 
