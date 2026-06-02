@@ -84,6 +84,28 @@ func TestRunContainerDoctorDoesNotClaimStrongWithoutEgressDeclaration(t *testing
 	}
 }
 
+func TestNonRootUserCheckAllowsNumericContainerUID(t *testing.T) {
+	originalUID := currentUID
+	currentUID = func() (string, error) { return "1001", nil }
+	t.Cleanup(func() { currentUID = originalUID })
+
+	check := checkNonRootUser()
+	if check.Status != StatusPass {
+		t.Fatalf("expected numeric non-root UID to pass, got %+v", check)
+	}
+}
+
+func TestNonRootUserCheckRejectsRoot(t *testing.T) {
+	originalUID := currentUID
+	currentUID = func() (string, error) { return "0", nil }
+	t.Cleanup(func() { currentUID = originalUID })
+
+	check := checkNonRootUser()
+	if check.Status != StatusFail {
+		t.Fatalf("expected root UID to fail, got %+v", check)
+	}
+}
+
 func TestRunCIDoctorRequiresCIIdentityAndRuntimeControls(t *testing.T) {
 	originalUID := currentUID
 	currentUID = func() (string, error) { return "10001", nil }

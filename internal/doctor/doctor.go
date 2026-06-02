@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/safe-agentic-world/prodclaw/internal/identity"
@@ -57,11 +57,7 @@ var currentUID = func() (string, error) {
 	if runtime.GOOS == "windows" {
 		return "non-windows-root", nil
 	}
-	current, err := user.Current()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(current.Uid), nil
+	return strconv.Itoa(os.Geteuid()), nil
 }
 
 func Run(opts Options) (Report, error) {
