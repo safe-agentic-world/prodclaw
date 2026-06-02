@@ -31,7 +31,7 @@ func TestReadTaskFileValidation(t *testing.T) {
 		task string
 		want string
 	}{
-		{name: "missing", task: "", want: "--task is required"},
+		{name: "missing", task: "", want: "--task-file is required"},
 		{name: "empty", task: empty, want: "task file is empty"},
 		{name: "large", task: large, want: "task file exceeds"},
 		{name: "invalid", task: invalid, want: "valid UTF-8"},
@@ -40,6 +40,54 @@ func TestReadTaskFileValidation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, err := ReadTaskFile(workspace, tc.task)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestReadTaskSelectsFileOrText(t *testing.T) {
+	workspace := t.TempDir()
+	taskPath := filepath.Join(workspace, "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+
+	source, text, err := ReadTask(workspace, TaskInput{File: "task.md"})
+	if err != nil {
+		t.Fatalf("read task file: %v", err)
+	}
+	if source != taskPath || text != "fix the build\n" {
+		t.Fatalf("unexpected file task source/text: %q %q", source, text)
+	}
+
+	source, text, err = ReadTask(workspace, TaskInput{Text: "say hi"})
+	if err != nil {
+		t.Fatalf("read task text: %v", err)
+	}
+	if source != InlineTaskSource || text != "say hi" {
+		t.Fatalf("unexpected inline task source/text: %q %q", source, text)
+	}
+
+	if _, _, err := ReadTask(workspace, TaskInput{File: "task.md", Text: "say hi"}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutual exclusion error, got %v", err)
+	}
+}
+
+func TestReadTaskTextValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "empty", text: " \n", want: "task text is empty"},
+		{name: "large", text: string(bytes.Repeat([]byte("x"), MaxTaskBytes+1)), want: "task text exceeds"},
+		{name: "invalid", text: string([]byte{0xff, 0xfe}), want: "valid UTF-8"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ReadTaskText(tc.text)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("expected %q error, got %v", tc.want, err)
 			}

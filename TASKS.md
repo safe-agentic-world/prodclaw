@@ -22,8 +22,9 @@ CI pipeline
 ProdClaw should ship as:
 
 - a CLI that can be installed in CI runners
-- a Docker image that provides the controlled runtime path
+- a raw CLI path that people can test quickly before adopting a controlled runtime
 - default policy profiles for users who do not provide a custom policy
+- later, an official Docker image that provides the controlled runtime path
 
 ## Why ProdClaw Is Separate From Nomos
 
@@ -113,7 +114,8 @@ Do not port Nomos subsystems that would expand MVP scope:
 | M8-M10 | They bind CI identity/credentials, prove the MCP contract, and make policy sources inspectable. |
 | M11-M13 | They wire agents uniformly, run jobs deterministically, and protect returned output/artifacts. |
 | M14-M16 | They provide controlled runtime, guarantee proof, and replayable evidence for CI review. |
-| M17-M20 | They make adoption/release concrete and define the final MVP release bar. |
+| M17-M20 | They make raw CLI adoption/release concrete and define the first MVP release bar. |
+| M21 | It adds official Docker image distribution and a host-side Docker runtime launcher after the raw CLI path is easy to try. |
 
 ## Product Contract
 
@@ -173,7 +175,7 @@ If an agent cannot support the uniform contract, ProdClaw must fail closed or ma
 | MCP expands the attack surface | Upstream tools must be registered behind ProdClaw, surfaced by policy, and audited as governed actions |
 | Audit formats differ across agents | ProdClaw emits a normalized audit stream independent of Codex, Claude Code, or future agents |
 | Agent CLIs expose different flags and MCP wiring | ProdClaw adapters normalize those differences behind one job contract and one policy boundary |
-| Local dev assumptions break CI | `ProdClaw job run` and the Docker image must work non-interactively with deterministic exit codes and artifacts |
+| Local dev assumptions break CI | `ProdClaw job run` must work non-interactively with deterministic exit codes and artifacts; the official Docker path is a later controlled-runtime adoption step |
 | Default setup is too hard | ProdClaw provides safe default CI profiles while supporting customer custom policies |
 
 ## Scope
@@ -183,7 +185,7 @@ If an agent cannot support the uniform contract, ProdClaw must fail closed or ma
 - Codex and Claude Code CI execution through ProdClaw
 - one uniform agent job contract across Codex, Claude Code, and future adapters
 - CLI entrypoint: `ProdClaw job run`
-- Docker image entrypoint for CI
+- raw CLI entrypoint for CI
 - customer policy bundles
 - explicit policy layering for baseline, organization, repository, and job-specific policy inputs
 - one or two built-in default CI profiles
@@ -208,7 +210,7 @@ If an agent cannot support the uniform contract, ProdClaw must fail closed or ma
 - replayable decision evidence for CI review
 - job budgets for tool calls, wall-clock time, output size, and network calls
 - policy explain output for denied actions
-- release checksums, SBOM, and provenance for official artifacts
+- release checksums, SBOM, and provenance for raw CLI artifacts
 - security regression tests for bypass attempts
 
 ### Out Of Scope For MVP
@@ -733,8 +735,8 @@ Deliverables:
 
 Acceptance:
 
-- [x] `prodclaw job run --agent codex --profile ci-strict --task <file> --dry-run` works without Codex credentials.
-- [x] `prodclaw job run --agent claude --profile ci-strict --task <file> --dry-run` works without Anthropic credentials.
+- [x] `prodclaw job run --agent codex --profile ci-strict --task-file <file> --dry-run` works without Codex credentials.
+- [x] `prodclaw job run --agent claude --profile ci-strict --task-file <file> --dry-run` works without Anthropic credentials.
 - [x] real Codex launch receives ProdClaw MCP configuration.
 - [x] real Claude Code launch receives ProdClaw MCP configuration.
 - [x] GitLab customer test wires Codex to ProdClaw MCP via Codex config overrides.
@@ -753,7 +755,9 @@ Deliverables:
 
 - [x] `prodclaw job run`.
 - [x] `--agent codex|claude`.
-- [x] `--task <path>`.
+- [x] `--task-file <path>`.
+- [x] `--task-text <text>`.
+- [x] legacy `--task <path>` alias for `--task-file`.
 - [x] `--workspace <path>`.
 - [x] `--policy-bundle <path>`.
 - [x] `--profile <name>`.
@@ -761,7 +765,7 @@ Deliverables:
 - [x] `--dry-run`.
 - [x] `--no-launch`.
 - [x] mutually exclusive policy/profile validation.
-- [x] task file size limits.
+- [x] task file and inline task text size limits.
 - [x] deterministic exit codes.
 - [x] changed-file summary.
 - [x] agent final-message capture when the selected agent supports it.
@@ -915,10 +919,8 @@ Nomos reference: check `../nomos` for reusable code, tests, or docs patterns; co
 Deliverables:
 
 - [ ] GitHub Actions example using CLI install.
-- [ ] GitHub Actions example using Docker.
 - [ ] GitLab CI example using CLI install.
 - [x] GitLab CI customer test installs ProdClaw from source and runs policy preflight.
-- [ ] GitLab CI example using Docker.
 - [ ] example task file.
 - [ ] example customer policy.
 - [ ] example explicit policy-layering config.
@@ -946,7 +948,6 @@ Deliverables:
 
 - [ ] README quickstart for CI.
 - [ ] README quickstart explains why ProdClaw is not Nomos and what scope was intentionally removed.
-- [ ] Docker quickstart.
 - [ ] customer policy guide.
 - [ ] policy layering guide.
 - [ ] default profile reference.
@@ -978,21 +979,18 @@ Nomos reference: check `../nomos` for reusable code, tests, or docs patterns; co
 Deliverables:
 
 - [ ] reproducible release workflow for Linux, macOS, and Windows binaries where practical.
-- [ ] official container image build.
 - [ ] checksums for release archives and binaries.
 - [ ] signed release artifacts or documented verification mechanism.
-- [ ] SBOM for binaries and container image.
+- [ ] SBOM for release binaries.
 - [ ] build provenance/attestation showing source revision and workflow identity.
 - [ ] vulnerability scan in release workflow.
 - [ ] documented `go install github.com/safe-agentic-world/prodclaw/cmd/prodclaw@latest` path.
-- [ ] documented container install path.
 - [ ] future package-manager handoff notes for Homebrew/Scoop repos without blocking MVP.
 
 Acceptance:
 
 - [ ] Users can verify official release artifacts with documented steps.
 - [ ] Each official release publishes checksums, SBOM, and provenance/attestation artifacts.
-- [ ] Container image provenance is documented separately from runtime enforcement guarantees.
 - [ ] Release automation fails if trust artifacts are missing.
 - [ ] Installation docs avoid asking users to clone source for normal CI use.
 
@@ -1019,8 +1017,6 @@ Required release checks:
 - [ ] job-runner failure-gate and budget tests pass.
 - [ ] return-path safety tests pass.
 - [ ] audit replay tests pass.
-- [ ] Docker dry-run test passes.
-- [ ] controlled-runtime proof workflow passes.
 - [ ] GitHub Actions example validates.
 - [ ] GitLab CI example validates.
 - [ ] GitLab CI Codex-through-ProdClaw-MCP example validates.
@@ -1040,6 +1036,40 @@ MVP is releasable when:
 - [ ] a job that cannot prove ProdClaw-governed actions occurred fails rather than passing on agent text alone.
 - [ ] official release artifacts have checksums, SBOM, and provenance.
 - [ ] no operator UI or approval workflow is required.
+
+## M21 - Official Docker Distribution And Runtime Launcher
+
+Goal: provide the controlled Docker adoption path after the raw CLI release is easy to test.
+
+Nomos reference: check `../nomos` for reusable code, tests, or docs patterns; copy only the minimum CI-relevant pieces.
+
+Deliverables:
+
+- [ ] official container image build.
+- [ ] official Codex-capable image or documented Codex install variant.
+- [ ] official Claude Code-capable image or documented Claude install variant.
+- [ ] container image tags that map to release versions and source revisions.
+- [ ] SBOM for container image.
+- [ ] build provenance/attestation for container image.
+- [ ] vulnerability scan for container image.
+- [ ] documented container install path.
+- [ ] Docker quickstart.
+- [ ] GitHub Actions example using Docker.
+- [ ] GitLab CI example using Docker.
+- [ ] host CLI runtime flag such as `prodclaw job run --runtime docker`.
+- [ ] host CLI image selection flag such as `--image ghcr.io/safe-agentic-world/prodclaw-codex:<version>`.
+- [ ] automatic workspace and artifact mounts for the host-side Docker launcher.
+
+Acceptance:
+
+- [ ] Users can run raw `prodclaw job run` without Docker for quick testing.
+- [ ] Users can opt into Docker with a short command, not a long manual `docker run` invocation.
+- [ ] `prodclaw job run --runtime docker --agent codex --task-file <path>` launches the official image with correct mounts.
+- [ ] Docker dry-run test passes.
+- [ ] controlled-runtime proof workflow passes for the official image.
+- [ ] Docker examples validate in GitHub Actions and GitLab CI.
+- [ ] Container image provenance is documented separately from runtime enforcement guarantees.
+- [ ] Docker remains an optional stronger-runtime path and does not block the raw CLI release.
 
 ## Future Backlog
 

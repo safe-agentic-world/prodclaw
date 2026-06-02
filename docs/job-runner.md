@@ -8,7 +8,7 @@
 prodclaw job run \
   --agent codex \
   --profile ci-strict \
-  --task task.md
+  --task-text 'First call ProdClaw run_command with argv ["git","status"], then say hi.'
 ```
 
 Use `--dry-run` before adding agent credentials:
@@ -17,9 +17,15 @@ Use `--dry-run` before adding agent credentials:
 prodclaw job run \
   --agent claude \
   --profile ci-strict \
-  --task task.md \
+  --task-file task.md \
   --dry-run
 ```
+
+Use exactly one task source:
+
+- `--task-text <text>` for short inline tasks.
+- `--task-file <path>` for checked-in or generated task files.
+- `--task <path>` remains a legacy alias for `--task-file`.
 
 `--workspace` defaults to the current directory. `--artifact-dir` defaults to `.prodclaw/job` inside the workspace.
 
@@ -74,7 +80,7 @@ Use `--expect-action <type>` when the job must prove that a governed action happ
 prodclaw job run \
   --agent codex \
   --profile ci-standard \
-  --task task.md \
+  --task-file task.md \
   --expect-action process.exec \
   --expect-action fs.write
 ```

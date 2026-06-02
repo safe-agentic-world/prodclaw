@@ -21,6 +21,8 @@ import (
 
 const MaxTaskBytes = 64 * 1024
 
+const InlineTaskSource = "inline://task"
+
 const (
 	ExitSuccess                 = 0
 	ExitPolicyDenied            = 10
@@ -109,10 +111,61 @@ type Result struct {
 	ReturnPathFindings      []scan.Finding `json:"return_path_findings,omitempty"`
 }
 
+type TaskInput struct {
+	LegacyPath string
+	File       string
+	Text       string
+}
+
+func ReadTask(workspace string, input TaskInput) (string, string, error) {
+	sources := 0
+	if strings.TrimSpace(input.LegacyPath) != "" {
+		sources++
+	}
+	if strings.TrimSpace(input.File) != "" {
+		sources++
+	}
+	if strings.TrimSpace(input.Text) != "" {
+		sources++
+	}
+	switch sources {
+	case 0:
+		return "", "", errors.New("one of --task-file or --task-text is required")
+	case 1:
+	default:
+		return "", "", errors.New("--task, --task-file, and --task-text are mutually exclusive")
+	}
+	if strings.TrimSpace(input.Text) != "" {
+		text, err := ReadTaskText(input.Text)
+		if err != nil {
+			return "", "", err
+		}
+		return InlineTaskSource, text, nil
+	}
+	if strings.TrimSpace(input.File) != "" {
+		return ReadTaskFile(workspace, input.File)
+	}
+	return ReadTaskFile(workspace, input.LegacyPath)
+}
+
+func ReadTaskText(raw string) (string, error) {
+	data := []byte(raw)
+	if len(bytes.TrimSpace(data)) == 0 {
+		return "", errors.New("task text is empty")
+	}
+	if len(data) > MaxTaskBytes {
+		return "", fmt.Errorf("task text exceeds %d bytes", MaxTaskBytes)
+	}
+	if !utf8.Valid(data) {
+		return "", errors.New("task text must be valid UTF-8")
+	}
+	return raw, nil
+}
+
 func ReadTaskFile(workspace, raw string) (string, string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", "", errors.New("--task is required")
+		return "", "", errors.New("--task-file is required")
 	}
 	path := raw
 	if !filepath.IsAbs(path) {

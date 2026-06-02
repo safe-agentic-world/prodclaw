@@ -37,9 +37,15 @@ Supported JSON fields:
   "principal": "system",
   "agent": "codex",
   "environment": "ci",
-  "task": "task.md"
+  "task_file": "task.md"
 }
 ```
+
+Use exactly one task field:
+
+- `task_file` for a task file path.
+- `task_text` for short inline task text.
+- `task` remains a legacy alias for `task_file`.
 
 Supported environment variables:
 
@@ -61,6 +67,8 @@ Supported environment variables:
 - `PRODCLAW_AGENT`
 - `PRODCLAW_ENVIRONMENT`
 - `PRODCLAW_TASK`
+- `PRODCLAW_TASK_FILE`
+- `PRODCLAW_TASK_TEXT`
 
 Unknown config fields fail closed. Operational logs are JSON on `stderr` and redact token-like fields before emission.
 

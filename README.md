@@ -70,8 +70,8 @@ Profile hashes are computed from the profile embedded in the running binary. Pro
 Use `ci-strict` by default or replace it with a customer-owned bundle once the job needs explicit organization policy:
 
 ```bash
-prodclaw job run --agent codex --task task.md --dry-run
-prodclaw job run --agent codex --task task.md --policy-bundle ./policy/prodclaw.yaml --dry-run
+prodclaw job run --agent codex --task-text 'First call ProdClaw run_command with argv ["git","status"], then say hi.' --dry-run
+prodclaw job run --agent codex --task-file task.md --policy-bundle ./policy/prodclaw.yaml --dry-run
 ```
 
 See `docs/default-profiles.md` for the default-profile contract and the replacement path.
@@ -93,7 +93,7 @@ docker run --rm \
   -v "$PWD/artifacts/prodclaw:/artifacts" \
   prodclaw:local \
   --agent codex \
-  --task /workspace/task.md \
+  --task-file /workspace/task.md \
   --dry-run
 ```
 

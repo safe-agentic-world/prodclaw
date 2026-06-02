@@ -267,6 +267,59 @@ func TestJobRunDryRunDefaultsToCIStrictProfile(t *testing.T) {
 	}
 }
 
+func TestJobRunDryRunAcceptsTaskFileFlag(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task-file", taskPath, "--dry-run"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if got.Task != taskPath {
+		t.Fatalf("task = %q, want %q", got.Task, taskPath)
+	}
+}
+
+func TestJobRunDryRunAcceptsTaskTextFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task-text", "say hi", "--dry-run"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if got.Task != jobkit.InlineTaskSource {
+		t.Fatalf("task = %q, want %q", got.Task, jobkit.InlineTaskSource)
+	}
+	prompt := strings.Join(got.LaunchPlan.Argv, "\n")
+	if !strings.Contains(prompt, "Task source: inline text") || !strings.Contains(prompt, "say hi") {
+		t.Fatalf("launch prompt missing inline task text: %s", prompt)
+	}
+}
+
+func TestJobRunRejectsMultipleTaskSources(t *testing.T) {
+	taskPath := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task-file", taskPath, "--task-text", "say hi", "--dry-run"}, &stdout, &stderr)
+	if code != jobkit.ExitInvalidConfig {
+		t.Fatalf("job run exit code = %d, want %d", code, jobkit.ExitInvalidConfig)
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("expected mutual exclusion error, got %q", stderr.String())
+	}
+}
+
 func TestJobRunRejectsBundleAndProfileTogether(t *testing.T) {
 	bundle, _ := writePolicyFixture(t, "ALLOW")
 	taskPath := filepath.Join(t.TempDir(), "task.md")

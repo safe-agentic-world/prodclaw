@@ -7,8 +7,8 @@ ProdClaw keeps Codex and Claude Code behind one launch-plan contract. The job me
 Use dry-run before adding credentials to a CI job:
 
 ```bash
-prodclaw job run --agent codex --profile ci-strict --task task.md --dry-run
-prodclaw job run --agent claude --profile ci-strict --task task.md --dry-run
+prodclaw job run --agent codex --profile ci-strict --task-file task.md --dry-run
+prodclaw job run --agent claude --profile ci-strict --task-file task.md --dry-run
 ```
 
 The JSON output includes:

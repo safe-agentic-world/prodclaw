@@ -13,7 +13,7 @@ The embedded profiles are useful for evaluation and safe defaults, but productio
 prodclaw profiles list
 prodclaw profiles show ci-strict
 prodclaw profiles verify
-prodclaw job run --agent codex --task task.md --dry-run
+prodclaw job run --agent codex --task-file task.md --dry-run
 ```
 
 `profiles list` identifies the embedded source and hash shipped in the running binary. `profiles verify` validates embedded bundles and, when the canonical `profiles/` directory is present, checks that the generated embedded bytes match the canonical YAML. `job run --dry-run` prints the selected profile and the effective policy hash used for execution.
@@ -27,7 +27,7 @@ Use exactly one of `--profile` or `--policy-bundle`.
 ```bash
 prodclaw job run \
   --agent codex \
-  --task task.md \
+  --task-file task.md \
   --policy-bundle ./policy/prodclaw.yaml \
   --dry-run
 ```

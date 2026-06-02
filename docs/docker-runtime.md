@@ -63,7 +63,7 @@ docker run --rm \
   -v "$PWD/artifacts/prodclaw:/artifacts" \
   prodclaw:local \
   --agent codex \
-  --task /workspace/task.md \
+  --task-file /workspace/task.md \
   --dry-run
 ```
 
@@ -78,7 +78,7 @@ docker run --rm \
   --workspace /workspace \
   --artifact-dir /artifacts \
   --agent codex \
-  --task /workspace/task.md \
+  --task-file /workspace/task.md \
   --dry-run
 ```
 
@@ -103,7 +103,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -v "$PWD:/workspace" \
   -v "$PWD/artifacts/prodclaw:/artifacts" \
   prodclaw:local \
-  --agent codex --task /workspace/task.md --dry-run
+  --agent codex --task-file /workspace/task.md --dry-run
 ```
 
 ## Policy Check Smoke Test
@@ -190,7 +190,7 @@ docker run --rm --network none \
   -v "$PWD:/workspace" \
   -v "$PWD/artifacts/prodclaw:/artifacts" \
   prodclaw:local \
-  --agent codex --task /workspace/task.md --dry-run
+  --agent codex --task-file /workspace/task.md --dry-run
 ```
 
 For real Codex or Claude Code jobs, the agent may need access to its model service. Use runner-level network policy, a CI firewall, or a controlled proxy that allows only the required platform endpoints and ProdClaw-governed paths. Do not set `PRODCLAW_EGRESS_BLOCKED=true` until those controls are active.

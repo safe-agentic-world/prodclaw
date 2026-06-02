@@ -107,7 +107,7 @@ func runJob(args []string, stdout, stderr io.Writer) int {
 
 func printJobHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  prodclaw job run --agent codex|claude --task <path> [--config <path>] [--profile <name> | --policy-bundle <path> | layered policy flags] [flags]")
+	fmt.Fprintln(w, "  prodclaw job run --agent codex|claude (--task-file <path> | --task-text <text>) [--config <path>] [--profile <name> | --policy-bundle <path> | layered policy flags] [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "flags:")
 	fmt.Fprintln(w, "  --artifact-dir <path>       artifact directory (default .prodclaw/job)")
@@ -121,6 +121,9 @@ func printJobHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --probe-tools               record advertised ProdClaw tools before launch")
 	fmt.Fprintln(w, "  --dry-run                   write deterministic preflight artifacts without launching")
 	fmt.Fprintln(w, "  --no-launch                 materialize artifacts/config and stop before launch")
+	fmt.Fprintln(w, "  --task-file <path>          task file path")
+	fmt.Fprintln(w, "  --task-text <text>          inline task text")
+	fmt.Fprintln(w, "  --task <path>               legacy alias for --task-file")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "notes:")
 	fmt.Fprintln(w, "  - defaults to the embedded ci-strict profile when no policy is provided")
@@ -133,6 +136,8 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	var configPath string
 	var agent string
 	var taskPath string
+	var taskFile string
+	var taskText string
 	var workspace string
 	var artifactDir string
 	var bundlePath string
@@ -146,7 +151,9 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	var budgetLimits jobkit.BudgetLimits
 	fs.StringVar(&configPath, "config", "", "json config path")
 	fs.StringVar(&agent, "agent", "", "agent adapter: codex|claude")
-	fs.StringVar(&taskPath, "task", "", "task file path")
+	fs.StringVar(&taskPath, "task", "", "legacy task file path")
+	fs.StringVar(&taskFile, "task-file", "", "task file path")
+	fs.StringVar(&taskText, "task-text", "", "inline task text")
 	fs.StringVar(&workspace, "workspace", ".", "workspace root")
 	fs.StringVar(&artifactDir, "artifact-dir", "", "artifact directory")
 	fs.StringVar(&bundlePath, "bundle", "", "policy bundle path")
@@ -176,14 +183,17 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "job run: budget limits must be >= 0")
 		return jobkit.ExitInvalidConfig
 	}
+	if countTaskFlags(fs) > 1 {
+		fmt.Fprintln(stderr, "job run: --task, --task-file, and --task-text are mutually exclusive")
+		return jobkit.ExitInvalidConfig
+	}
 	cfg, err := runtimeconfig.Load(configPath, os.LookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: load config: %v\n", err)
 		return jobkit.ExitInvalidConfig
 	}
-	overlayJobFlags(fs, &cfg, agent, taskPath, workspace, bundlePath, profileName, controlledCI, policyInputFlags)
+	overlayJobFlags(fs, &cfg, agent, taskPath, taskFile, taskText, workspace, bundlePath, profileName, controlledCI, policyInputFlags)
 	agent = cfg.Agent
-	taskPath = cfg.TaskPath
 	workspace = defaultString(cfg.Workspace, ".")
 	bundlePath = cfg.PolicyBundle
 	profileName = cfg.Profile
@@ -198,7 +208,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "job run: %v\n", err)
 		return jobkit.ExitInvalidConfig
 	}
-	taskAbs, taskText, err := jobkit.ReadTaskFile(workspaceAbs, taskPath)
+	taskSource, taskText, err := jobkit.ReadTask(workspaceAbs, jobkit.TaskInput{LegacyPath: cfg.TaskPath, File: cfg.TaskFile, Text: cfg.TaskText})
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: %v\n", err)
 		return jobkit.ExitInvalidConfig
@@ -244,7 +254,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	if capabilities.FinalOutputCapture != "" && capabilities.FinalOutputCapture != "unsupported" {
 		artifacts.AgentMessage = filepath.Join(artifactDirAbs, "agent-final-message.txt")
 	}
-	prompt := buildGovernedJobPrompt(workspaceAbs, taskAbs, taskText)
+	prompt := buildGovernedJobPrompt(workspaceAbs, taskSource, taskText)
 	mcpArgs := buildJobMCPArgs(selection, cfg, workspaceAbs, artifacts.AgentArtifacts, verifiedIdentity)
 	mcpConfig, err := agentkit.BuildMCPConfig("prodclaw", mcpArgs)
 	if err != nil {
@@ -282,7 +292,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	output := jobRunOutput{
 		Mode:                selectJobRunMode(dryRun, noLaunch),
 		Agent:               verifiedIdentity.Agent,
-		Task:                taskAbs,
+		Task:                taskSource,
 		Workspace:           workspaceAbs,
 		ArtifactDir:         artifactDirAbs,
 		Profile:             selection.ProfileName,
@@ -427,12 +437,23 @@ func jobAssuranceLookup(base identity.LookupEnv) identity.LookupEnv {
 	}
 }
 
-func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, workspace, bundlePath, profileName string, controlledCI bool, policyInputFlags policyInputFlagValues) {
+func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, taskFile, taskText, workspace, bundlePath, profileName string, controlledCI bool, policyInputFlags policyInputFlagValues) {
 	if flagWasSet(fs, "agent") {
 		cfg.Agent = agent
 	}
-	if flagWasSet(fs, "task") {
-		cfg.TaskPath = taskPath
+	if flagWasSet(fs, "task") || flagWasSet(fs, "task-file") || flagWasSet(fs, "task-text") {
+		cfg.TaskPath = ""
+		cfg.TaskFile = ""
+		cfg.TaskText = ""
+		if flagWasSet(fs, "task") {
+			cfg.TaskPath = taskPath
+		}
+		if flagWasSet(fs, "task-file") {
+			cfg.TaskFile = taskFile
+		}
+		if flagWasSet(fs, "task-text") {
+			cfg.TaskText = taskText
+		}
 	}
 	if flagWasSet(fs, "workspace") {
 		cfg.Workspace = workspace
@@ -598,12 +619,26 @@ func invalidBudgetLimits(limits jobkit.BudgetLimits) bool {
 		limits.ArtifactBytes < 0
 }
 
-func buildGovernedJobPrompt(workspace, taskPath, task string) string {
+func countTaskFlags(fs *flag.FlagSet) int {
+	count := 0
+	for _, name := range []string{"task", "task-file", "task-text"} {
+		if flagWasSet(fs, name) {
+			count++
+		}
+	}
+	return count
+}
+
+func buildGovernedJobPrompt(workspace, taskSource, task string) string {
+	taskHeader := "Task file: " + taskSource
+	if taskSource == jobkit.InlineTaskSource {
+		taskHeader = "Task source: inline text"
+	}
 	return "Run this ProdClaw-governed CI job in workspace " + workspace + ".\n" +
 		"Use only ProdClaw MCP tools for file writes, patching, shell/git commands, HTTP requests, upstream tools, and artifacts.\n" +
 		"Do not use native shell, native file-write, native patch, native HTTP, or raw upstream MCP tools for side effects.\n" +
 		"If ProdClaw denies a required action, stop and explain the policy gap instead of bypassing it.\n" +
-		"Task file: " + taskPath + "\n\n" + task
+		taskHeader + "\n\n" + task
 }
 
 func probeJobTools(bundle policy.Bundle, workspace, artifactDir, auditPath string, id identity.VerifiedIdentity) ([]string, error) {

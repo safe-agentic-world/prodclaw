@@ -37,6 +37,22 @@ func TestLoadUsesFileThenEnvironment(t *testing.T) {
 	}
 }
 
+func TestTaskTextEnvironmentOverridesTaskFile(t *testing.T) {
+	values, err := Decode([]byte(`{"agent":"codex","task_file":"task.md"}`))
+	if err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	values.applyEnv(func(key string) (string, bool) {
+		if key == "PRODCLAW_TASK_TEXT" {
+			return "say hi", true
+		}
+		return "", false
+	})
+	if values.TaskPath != "" || values.TaskFile != "" || values.TaskText != "say hi" {
+		t.Fatalf("expected task text env to replace file sources, got %+v", values)
+	}
+}
+
 func TestDecodeRejectsUnknownFields(t *testing.T) {
 	if _, err := Decode([]byte(`{"profile":"ci-strict","unknown":true}`)); err == nil {
 		t.Fatal("expected unknown field rejection")

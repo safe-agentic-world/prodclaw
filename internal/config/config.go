@@ -20,6 +20,8 @@ type Values struct {
 	Agent        string       `json:"agent,omitempty"`
 	Environment  string       `json:"environment,omitempty"`
 	TaskPath     string       `json:"task,omitempty"`
+	TaskFile     string       `json:"task_file,omitempty"`
+	TaskText     string       `json:"task_text,omitempty"`
 	ControlledCI bool         `json:"controlled_ci,omitempty"`
 }
 
@@ -100,7 +102,21 @@ func (v *Values) applyEnv(lookupEnv LookupEnv) {
 	apply(&v.Principal, "PRODCLAW_PRINCIPAL")
 	apply(&v.Agent, "PRODCLAW_AGENT")
 	apply(&v.Environment, "PRODCLAW_ENVIRONMENT")
-	apply(&v.TaskPath, "PRODCLAW_TASK")
+	if value, ok := lookupEnv("PRODCLAW_TASK"); ok {
+		v.TaskPath = value
+		v.TaskFile = ""
+		v.TaskText = ""
+	}
+	if value, ok := lookupEnv("PRODCLAW_TASK_FILE"); ok {
+		v.TaskPath = ""
+		v.TaskFile = value
+		v.TaskText = ""
+	}
+	if value, ok := lookupEnv("PRODCLAW_TASK_TEXT"); ok {
+		v.TaskPath = ""
+		v.TaskFile = ""
+		v.TaskText = value
+	}
 	if value, ok := lookupEnv("PRODCLAW_CONTROLLED_CI"); ok {
 		v.ControlledCI = parseBool(value)
 	}
