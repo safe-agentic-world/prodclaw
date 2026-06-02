@@ -47,7 +47,7 @@ For the MVP, install from source with Go:
 go install github.com/safe-agentic-world/prodclaw/cmd/prodclaw@latest
 ```
 
-Versioned binaries are published from GitHub tags. Create a tag like `v0.1.0` to build Linux, macOS, and Windows artifacts with SHA256 checksums, Sigstore signatures, an SPDX SBOM, and release provenance.
+Versioned binaries are published from semantic release tags. The standard release path creates a tag like `v0.1.0` after `Enterprise CI` passes on `main`, then dispatches the release workflow to build Linux, macOS, and Windows artifacts with SHA256 checksums, Sigstore signatures, an SPDX SBOM, and release provenance.
 
 See:
 

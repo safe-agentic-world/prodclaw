@@ -34,6 +34,13 @@ Official releases publish Linux, macOS, and Windows archives on GitHub releases:
 - `prodclaw-windows-amd64.zip`
 - `prodclaw-windows-arm64.zip`
 
+The standard release path mirrors Nomos:
+
+- `Enterprise CI` passes on `main`.
+- `Auto Tag Release` creates the next semantic tag for `feat`, `fix`, or breaking-change commits.
+- `Auto Tag Release` dispatches the `Release` workflow with that tag.
+- Operators can also run `Release` manually with an existing `vX.Y.Z` tag.
+
 Verify archives before use with [Release Verification](release-verification.md).
 
 ## Homebrew And Scoop Handoff

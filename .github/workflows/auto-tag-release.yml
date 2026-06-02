@@ -1,0 +1,223 @@
+name: Auto Tag Release
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_run:
+    workflows:
+      - Enterprise CI
+    types:
+      - completed
+
+concurrency:
+  group: auto-tag-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate-bump:
+    name: Validate Semantic Release
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate semantic version bump
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          subject="$(git log -1 --pretty=%s)"
+          body="$(git log -1 --pretty=%B)"
+          bump=""
+          header="${subject%%:*}"
+          type="${header%%(*}"
+          type="${type%!}"
+
+          if grep -q 'BREAKING CHANGE:' <<<"${body}" || [[ "${header}" == *"!" ]]; then
+            bump="major"
+          else
+            case "${type}" in
+              feat)
+                bump="minor"
+                ;;
+              fix)
+                bump="patch"
+                ;;
+            esac
+          fi
+
+          if [[ -z "${bump}" ]]; then
+            echo "Commit does not request a semantic release tag; skipping."
+            echo "Latest commit: ${subject}"
+            exit 0
+          fi
+
+          latest_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n1)"
+          if [[ -z "${latest_tag}" ]]; then
+            latest_tag="v0.0.0"
+          fi
+
+          version="${latest_tag#v}"
+          IFS='.' read -r major minor patch <<<"${version}"
+
+          case "${bump}" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+          esac
+
+          next_tag="v${major}.${minor}.${patch}"
+          echo "Computed release tag ${next_tag} from commit: ${subject}"
+          echo "Pull request validation only; not creating a tag."
+
+  tag-release:
+    name: Tag Semantic Release
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.actor.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create tag from successful main workflow
+        uses: actions/github-script@v8.0.0
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const headSha = context.payload.workflow_run.head_sha;
+
+            function determineBump(message) {
+              const [subject, ...rest] = message.split("\n");
+              const body = rest.join("\n");
+              const header = subject.includes(":") ? subject.slice(0, subject.indexOf(":")) : subject;
+              const type = header.includes("(") ? header.slice(0, header.indexOf("(")).replace(/!$/, "") : header.replace(/!$/, "");
+
+              if (body.includes("BREAKING CHANGE:") || header.endsWith("!")) {
+                return { bump: "major", subject };
+              }
+              if (type === "feat") {
+                return { bump: "minor", subject };
+              }
+              if (type === "fix") {
+                return { bump: "patch", subject };
+              }
+              return { bump: "", subject };
+            }
+
+            function compareVersions(a, b) {
+              for (let i = 0; i < 3; i += 1) {
+                if (a[i] !== b[i]) {
+                  return a[i] - b[i];
+                }
+              }
+              return 0;
+            }
+
+            const commitResponse = await github.rest.repos.getCommit({
+              owner,
+              repo,
+              ref: headSha,
+            });
+            const commitMessage = commitResponse.data.commit.message;
+            const { bump, subject } = determineBump(commitMessage);
+            let tagName = "";
+
+            if (!bump) {
+              core.info(`Commit does not request a semantic release tag; skipping. Latest commit: ${subject}`);
+              return;
+            }
+
+            const refs = await github.paginate(github.rest.git.listMatchingRefs, {
+              owner,
+              repo,
+              ref: "tags/v",
+            });
+
+            for (const ref of refs) {
+              if (!/^refs\/tags\/v\d+\.\d+\.\d+$/.test(ref.ref)) {
+                continue;
+              }
+              if (ref.object.type === "commit" && ref.object.sha === headSha) {
+                tagName = ref.ref.replace("refs/tags/", "");
+                core.info(`HEAD already has semantic version tag ${tagName}.`);
+                break;
+              }
+              if (ref.object.type === "tag") {
+                const tagObject = await github.rest.git.getTag({
+                  owner,
+                  repo,
+                  tag_sha: ref.object.sha,
+                });
+                if (tagObject.data.object.type === "commit" && tagObject.data.object.sha === headSha) {
+                  tagName = ref.ref.replace("refs/tags/", "");
+                  core.info(`HEAD already has semantic version tag ${tagName}.`);
+                  break;
+                }
+              }
+            }
+
+            let latest = [0, 0, 0];
+            for (const ref of refs) {
+              const match = ref.ref.match(/^refs\/tags\/v(\d+)\.(\d+)\.(\d+)$/);
+              if (!match) {
+                continue;
+              }
+              const version = match.slice(1).map((value) => Number.parseInt(value, 10));
+              if (compareVersions(version, latest) > 0) {
+                latest = version;
+              }
+            }
+
+            if (!tagName) {
+              if (bump === "major") {
+                latest = [latest[0] + 1, 0, 0];
+              } else if (bump === "minor") {
+                latest = [latest[0], latest[1] + 1, 0];
+              } else {
+                latest = [latest[0], latest[1], latest[2] + 1];
+              }
+
+              tagName = `v${latest[0]}.${latest[1]}.${latest[2]}`;
+              core.info(`Computed release tag ${tagName} from commit: ${subject}`);
+
+              const tagObject = await github.rest.git.createTag({
+                owner,
+                repo,
+                tag: tagName,
+                message: tagName,
+                object: headSha,
+                type: "commit",
+              });
+
+              await github.rest.git.createRef({
+                owner,
+                repo,
+                ref: `refs/tags/${tagName}`,
+                sha: tagObject.data.sha,
+              });
+            }
+
+            await github.rest.repos.createDispatchEvent({
+              owner,
+              repo,
+              event_type: "publish-release",
+              client_payload: {
+                tag: tagName,
+                sha: headSha,
+              },
+            });

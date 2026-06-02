@@ -1,17 +1,25 @@
-name: CI
+name: Enterprise CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
+    tags:
+      - "v*"
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  GOFLAGS: -mod=readonly
+  GO_VERSION: "1.25.10"
 
 jobs:
   test:
@@ -21,12 +29,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6.3.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Download Modules
@@ -111,11 +119,12 @@ jobs:
 
       - name: Upload Raw CLI Example Artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: prodclaw-raw-cli-example-artifacts
           path: artifacts/prodclaw/examples/
           retention-days: 7
+          if-no-files-found: ignore
 
       - name: Clean CI CLI Smoke Test
         run: |
@@ -126,3 +135,50 @@ jobs:
             --agent codex \
             --task-file /tmp/prodclaw-task.md \
             --dry-run
+
+  release-dry-run:
+    name: Release Dry Run
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@v6.3.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Dry-run release build
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run ./scripts/release \
+            --mode build \
+            --version v0.0.0-dry-run \
+            --dist dist
+          printf '{"spdxVersion":"SPDX-2.3","name":"local-placeholder"}\n' > dist/prodclaw-sbom.spdx.json
+          go run ./scripts/release \
+            --mode provenance \
+            --version v0.0.0-dry-run \
+            --dist dist \
+            --repository "${{ github.repository }}" \
+            --workflow ".github/workflows/release.yml" \
+            --run-id "${{ github.run_id }}" \
+            --go-version "${GO_VERSION}"
+          required=(
+            prodclaw-linux-amd64.tar.gz
+            prodclaw-linux-arm64.tar.gz
+            prodclaw-darwin-amd64.tar.gz
+            prodclaw-darwin-arm64.tar.gz
+            prodclaw-windows-amd64.zip
+            prodclaw-windows-arm64.zip
+            prodclaw-checksums.txt
+            prodclaw-sbom.spdx.json
+            prodclaw-provenance.intoto.jsonl
+          )
+          for asset in "${required[@]}"; do
+            test -s "dist/${asset}"
+          done

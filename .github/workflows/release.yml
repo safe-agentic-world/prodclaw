@@ -1,13 +1,13 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  repository_dispatch:
+    types:
+      - publish-release
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version, for example v0.1.0"
+      tag:
+        description: Release tag to publish (for example v0.1.0)
         required: true
         type: string
 
@@ -15,46 +15,49 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.client_payload.tag || github.event.inputs.tag || github.ref }}
   cancel-in-progress: false
 
+env:
+  GO_VERSION: "1.25.10"
+
 jobs:
-  release:
-    name: Build And Publish Release
+  publish:
+    name: Publish Release
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
     permissions:
       contents: write
       id-token: write
-
     steps:
-      - name: Resolve Version
-        id: version
+      - name: Resolve release tag
+        id: meta
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            version="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_EVENT_NAME}" == "repository_dispatch" ]]; then
+            tag="${{ github.event.client_payload.tag }}"
           else
-            version="${{ inputs.version }}"
+            tag="${{ github.event.inputs.tag }}"
           fi
-          if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "version must look like v0.1.0 or v0.1.0-rc.1" >&2
-            exit 2
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: ${tag}" >&2
+            exit 1
           fi
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
-      - name: Checkout Release Ref
-        uses: actions/checkout@v4
+      - name: Checkout tag
+        uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0
-          ref: refs/tags/${{ steps.version.outputs.version }}
+          ref: refs/tags/${{ steps.meta.outputs.tag }}
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6.3.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Test
@@ -68,16 +71,16 @@ jobs:
           GOBIN="${RUNNER_TEMP}/release-tools" go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           "${RUNNER_TEMP}/release-tools/govulncheck" ./...
 
-      - name: Build Release Archives
+      - name: Build release archives
         shell: bash
         run: |
           set -euo pipefail
           go run ./scripts/release \
             --mode build \
-            --version "${{ steps.version.outputs.version }}" \
+            --version "${{ steps.meta.outputs.tag }}" \
             --dist dist
 
-      - name: Install Supply-Chain Tools
+      - name: Install supply-chain tooling
         shell: bash
         run: |
           set -euo pipefail
@@ -93,36 +96,37 @@ jobs:
           set -euo pipefail
           "${TOOLS_BIN}/syft" packages dir:dist -o spdx-json > dist/prodclaw-sbom.spdx.json
 
-      - name: Generate Provenance
+      - name: Generate provenance
         shell: bash
         run: |
           set -euo pipefail
           go run ./scripts/release \
             --mode provenance \
-            --version "${{ steps.version.outputs.version }}" \
+            --version "${{ steps.meta.outputs.tag }}" \
             --dist dist \
             --repository "${{ github.repository }}" \
             --workflow ".github/workflows/release.yml" \
             --run-id "${{ github.run_id }}" \
-            --go-version "$(go env GOVERSION)"
+            --go-version "${GO_VERSION}"
 
-      - name: Sign Release Assets
+      - name: Sign release assets
         shell: bash
         run: |
           set -euo pipefail
+          COSIGN_BIN="${TOOLS_BIN}/cosign"
           for file in \
             dist/prodclaw-*.tar.gz \
             dist/prodclaw-*.zip \
             dist/prodclaw-checksums.txt \
             dist/prodclaw-sbom.spdx.json \
             dist/prodclaw-provenance.intoto.jsonl; do
-            "${TOOLS_BIN}/cosign" sign-blob --yes \
+            "${COSIGN_BIN}" sign-blob --yes \
               --output-signature "${file}.sig" \
               --output-certificate "${file}.pem" \
               "${file}"
           done
 
-      - name: Verify Required Trust Artifacts
+      - name: Verify required trust artifacts
         shell: bash
         run: |
           set -euo pipefail
@@ -143,28 +147,25 @@ jobs:
             test -s "dist/${asset}.pem"
           done
 
-      - name: Publish GitHub Release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2.5.0
         with:
-          tag_name: ${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.meta.outputs.tag }}
           files: dist/*
           generate_release_notes: true
 
-      - name: Update Homebrew And Scoop Manifests
+      - name: Update Homebrew and Scoop manifests
+        if: ${{ github.event_name == 'repository_dispatch' }}
         env:
           PACKAGES_REPO_TOKEN: ${{ secrets.PACKAGES_REPO_TOKEN }}
           HOMEBREW_REPO: safe-agentic-world/homebrew-prodclaw
           SCOOP_REPO: safe-agentic-world/scoop-prodclaw
-          RELEASE_TAG: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           CHECKSUM_FILE: ${{ github.workspace }}/dist/prodclaw-checksums.txt
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${PACKAGES_REPO_TOKEN:-}" ]]; then
-            echo "::warning::PACKAGES_REPO_TOKEN is not set; skipping Homebrew/Scoop manifest update."
-            exit 0
-          fi
           if ! bash ./scripts/update-packages-repo.sh; then
             echo "::warning::package repo update failed; release was published, but Homebrew/Scoop manifests were not updated"
           fi
