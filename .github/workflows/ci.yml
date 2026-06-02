@@ -77,6 +77,46 @@ jobs:
             --profile ci-standard \
             --action examples/actions/git-status.json
 
+      - name: Raw CLI Examples Smoke Test
+        run: |
+          mkdir -p artifacts/prodclaw/examples
+          ./prodclaw policy check \
+            --policy-bundle examples/policies/customer-ci.yaml \
+            --action examples/actions/git-status.json \
+            > artifacts/prodclaw/examples/allow-git-status.json
+          ./prodclaw policy explain \
+            --policy-bundle examples/policies/customer-ci.yaml \
+            --action examples/actions/git-push-main.json \
+            > artifacts/prodclaw/examples/deny-git-push-main.json
+          grep -q '"decision": "ALLOW"' artifacts/prodclaw/examples/allow-git-status.json
+          grep -q '"decision": "DENY"' artifacts/prodclaw/examples/deny-git-push-main.json
+
+          ./prodclaw job run \
+            --agent codex \
+            --profile ci-standard \
+            --task-file examples/tasks/codex-smoke.md \
+            --artifact-dir artifacts/prodclaw/examples/dry-run \
+            --dry-run \
+            > artifacts/prodclaw/examples/dry-run-output.json
+          ./prodclaw replay --artifact-dir artifacts/prodclaw/examples/dry-run > artifacts/prodclaw/examples/dry-run-replay.txt
+          grep -q 'Valid: true' artifacts/prodclaw/examples/dry-run-replay.txt
+
+          ./prodclaw job run \
+            --config examples/config/layered-policy.json \
+            --artifact-dir artifacts/prodclaw/examples/layered-dry-run \
+            --dry-run \
+            > artifacts/prodclaw/examples/layered-dry-run-output.json
+          ./prodclaw replay --artifact-dir artifacts/prodclaw/examples/layered-dry-run > artifacts/prodclaw/examples/layered-dry-run-replay.txt
+          grep -q 'Valid: true' artifacts/prodclaw/examples/layered-dry-run-replay.txt
+
+      - name: Upload Raw CLI Example Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prodclaw-raw-cli-example-artifacts
+          path: artifacts/prodclaw/examples/
+          retention-days: 7
+
       - name: Clean CI CLI Smoke Test
         run: |
           printf 'fix the build\n' > /tmp/prodclaw-task.md
@@ -84,5 +124,5 @@ jobs:
           env -i PATH="$PATH" HOME="$HOME" ./prodclaw profiles list
           env -i PATH="$PATH" HOME="$HOME" ./prodclaw job run \
             --agent codex \
-            --task /tmp/prodclaw-task.md \
+            --task-file /tmp/prodclaw-task.md \
             --dry-run

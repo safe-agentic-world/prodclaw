@@ -1,0 +1,108 @@
+variables:
+  PRODCLAW_INSTALL_REF: "main"
+  PRODCLAW_PROFILE: "ci-standard"
+  GOFLAGS: "-mod=readonly"
+
+image: golang:1.25-alpine
+
+stages:
+  - policy
+  - dry-run
+  - agent
+
+default:
+  before_script:
+    - apk add --no-cache bash git nodejs npm
+    - GOPROXY=direct go install "github.com/safe-agentic-world/prodclaw/cmd/prodclaw@${PRODCLAW_INSTALL_REF}"
+    - export PATH="$(go env GOPATH)/bin:$PATH"
+
+prodclaw_policy_check:
+  stage: policy
+  script:
+    - mkdir -p artifacts/prodclaw/policy
+    - prodclaw version
+    - prodclaw policy check --policy-bundle examples/policies/customer-ci.yaml --action examples/actions/git-status.json > artifacts/prodclaw/policy/allow-git-status.json
+    - prodclaw policy explain --policy-bundle examples/policies/customer-ci.yaml --action examples/actions/git-push-main.json > artifacts/prodclaw/policy/deny-git-push-main.json
+    - 'grep -q ''"decision": "ALLOW"'' artifacts/prodclaw/policy/allow-git-status.json'
+    - 'grep -q ''"decision": "DENY"'' artifacts/prodclaw/policy/deny-git-push-main.json'
+  artifacts:
+    when: always
+    paths:
+      - artifacts/prodclaw/policy/
+    expire_in: 7 days
+
+prodclaw_dry_run:
+  stage: dry-run
+  needs:
+    - job: prodclaw_policy_check
+      artifacts: true
+  script:
+    - mkdir -p artifacts/prodclaw
+    - prodclaw job run --agent codex --profile "$PRODCLAW_PROFILE" --task-file examples/tasks/codex-smoke.md --artifact-dir artifacts/prodclaw/dry-run --dry-run > artifacts/prodclaw/dry-run-output.json
+    - prodclaw replay --artifact-dir artifacts/prodclaw/dry-run > artifacts/prodclaw/dry-run-replay.txt
+    - grep -q 'Valid: true' artifacts/prodclaw/dry-run-replay.txt
+    - prodclaw job run --config examples/config/layered-policy.json --artifact-dir artifacts/prodclaw/layered-dry-run --dry-run > artifacts/prodclaw/layered-dry-run-output.json
+    - prodclaw replay --artifact-dir artifacts/prodclaw/layered-dry-run > artifacts/prodclaw/layered-dry-run-replay.txt
+    - grep -q 'Valid: true' artifacts/prodclaw/layered-dry-run-replay.txt
+  artifacts:
+    when: always
+    paths:
+      - artifacts/prodclaw/
+    expire_in: 7 days
+
+prodclaw_real_codex:
+  stage: agent
+  needs:
+    - job: prodclaw_dry_run
+      artifacts: true
+  script:
+    - |
+      set -euo pipefail
+      mkdir -p artifacts/prodclaw
+      if [ -z "${OPENAI_API_KEY:-}" ]; then
+        echo "OPENAI_API_KEY is not set; skipping optional real-agent examples."
+        exit 0
+      fi
+
+      npm i -g @openai/codex@latest
+      printenv OPENAI_API_KEY | codex login --with-api-key
+
+      prodclaw job run \
+        --agent codex \
+        --profile "$PRODCLAW_PROFILE" \
+        --task-file examples/tasks/codex-smoke.md \
+        --artifact-dir artifacts/prodclaw/real-codex \
+        --probe-tools \
+        --expect-action process.exec \
+        --expect-action fs.write \
+        --expect-action artifact.write
+      prodclaw replay --artifact-dir artifacts/prodclaw/real-codex > artifacts/prodclaw/real-codex-replay.txt
+      grep -q 'Valid: true' artifacts/prodclaw/real-codex-replay.txt
+
+      set +e
+      prodclaw job run \
+        --agent codex \
+        --profile "$PRODCLAW_PROFILE" \
+        --task-file examples/tasks/policy-denial.md \
+        --artifact-dir artifacts/prodclaw/policy-denial \
+        --expect-action process.exec
+      status=$?
+      set -e
+      test "$status" -eq 10
+
+      set +e
+      prodclaw job run \
+        --agent codex \
+        --profile "$PRODCLAW_PROFILE" \
+        --task-file examples/tasks/budget-exhaustion.md \
+        --artifact-dir artifacts/prodclaw/budget-exhaustion \
+        --expect-action process.exec \
+        --max-tool-calls 1
+      status=$?
+      set -e
+      test "$status" -eq 60
+  artifacts:
+    when: always
+    paths:
+      - artifacts/prodclaw/
+    expire_in: 7 days

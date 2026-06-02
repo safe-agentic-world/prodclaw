@@ -1,0 +1,61 @@
+version: v1
+rules:
+  - id: customer-deny-dotenv-read
+    action_type: fs.read
+    resource: file://workspace/**/.env*
+    decision: DENY
+
+  - id: customer-deny-private-key-read
+    action_type: fs.read
+    resource: file://workspace/**/*.key
+    decision: DENY
+
+  - id: customer-deny-protected-branch-push
+    action_type: process.exec
+    resource: file://workspace/
+    decision: DENY
+    exec_match:
+      argv_patterns:
+        - ["git", "push", "**", "main"]
+        - ["git", "push", "**", "master"]
+        - ["git", "push", "**", "HEAD:refs/heads/main"]
+        - ["git", "push", "**", "HEAD:refs/heads/master"]
+
+  - id: customer-allow-workspace-read
+    action_type: fs.read
+    resource: file://workspace/**
+    decision: ALLOW
+
+  - id: customer-allow-workspace-write
+    action_type: fs.write
+    resource: file://workspace/**
+    decision: ALLOW
+    obligations:
+      sandbox_mode: ci
+
+  - id: customer-allow-artifacts
+    action_type: artifact.write
+    resource: artifact://job/**
+    decision: ALLOW
+
+  - id: customer-allow-git-status
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["git", "status"]
+        - ["git", "status", "**"]
+    obligations:
+      sandbox_mode: ci
+
+  - id: customer-allow-go-test
+    action_type: process.exec
+    resource: file://workspace/
+    decision: ALLOW
+    exec_match:
+      argv_patterns:
+        - ["go", "test"]
+        - ["go", "test", "**"]
+    obligations:
+      sandbox_mode: ci

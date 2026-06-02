@@ -1,0 +1,15 @@
+{
+  "schema_version": "v1",
+  "action_id": "example-git-push-main",
+  "action_type": "process.exec",
+  "resource": "file://workspace/",
+  "params": {
+    "argv": ["git", "push", "origin", "main"],
+    "cwd": "",
+    "env_allowlist_keys": []
+  },
+  "trace_id": "example-trace",
+  "context": {
+    "extensions": {}
+  }
+}

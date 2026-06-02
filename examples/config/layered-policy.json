@@ -1,0 +1,15 @@
+{
+  "agent": "codex",
+  "task_file": "examples/tasks/codex-smoke.md",
+  "policy_inputs": {
+    "baseline": {
+      "path": "examples/policies/base.yaml"
+    },
+    "repository": {
+      "path": "examples/policies/repo.yaml"
+    },
+    "environment": {
+      "path": "examples/policies/dev.yaml"
+    }
+  }
+}

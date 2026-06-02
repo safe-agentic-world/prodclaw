@@ -1,0 +1,184 @@
+name: ProdClaw CLI Example
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PRODCLAW_INSTALL_REF: main
+  PRODCLAW_PROFILE: ci-standard
+
+jobs:
+  policy-check:
+    name: Policy Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
+      - name: Install ProdClaw
+        run: |
+          GOPROXY=direct go install "github.com/safe-agentic-world/prodclaw/cmd/prodclaw@${PRODCLAW_INSTALL_REF}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Check Customer Policy
+        run: |
+          mkdir -p artifacts/prodclaw/policy
+          prodclaw version
+          prodclaw policy check \
+            --policy-bundle examples/policies/customer-ci.yaml \
+            --action examples/actions/git-status.json \
+            > artifacts/prodclaw/policy/allow-git-status.json
+          prodclaw policy explain \
+            --policy-bundle examples/policies/customer-ci.yaml \
+            --action examples/actions/git-push-main.json \
+            > artifacts/prodclaw/policy/deny-git-push-main.json
+          grep -q '"decision": "ALLOW"' artifacts/prodclaw/policy/allow-git-status.json
+          grep -q '"decision": "DENY"' artifacts/prodclaw/policy/deny-git-push-main.json
+
+      - name: Upload Policy Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prodclaw-policy-artifacts
+          path: artifacts/prodclaw/policy/
+          retention-days: 7
+
+  dry-run:
+    name: Dry Run
+    runs-on: ubuntu-latest
+    needs: policy-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
+      - name: Install ProdClaw
+        run: |
+          GOPROXY=direct go install "github.com/safe-agentic-world/prodclaw/cmd/prodclaw@${PRODCLAW_INSTALL_REF}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run Built-In Profile Dry Run
+        run: |
+          mkdir -p artifacts/prodclaw
+          prodclaw job run \
+            --agent codex \
+            --profile "$PRODCLAW_PROFILE" \
+            --task-file examples/tasks/codex-smoke.md \
+            --artifact-dir artifacts/prodclaw/dry-run \
+            --dry-run \
+            > artifacts/prodclaw/dry-run-output.json
+          prodclaw replay --artifact-dir artifacts/prodclaw/dry-run > artifacts/prodclaw/dry-run-replay.txt
+          grep -q 'Valid: true' artifacts/prodclaw/dry-run-replay.txt
+
+      - name: Run Layered Policy Dry Run
+        run: |
+          prodclaw job run \
+            --config examples/config/layered-policy.json \
+            --artifact-dir artifacts/prodclaw/layered-dry-run \
+            --dry-run \
+            > artifacts/prodclaw/layered-dry-run-output.json
+          prodclaw replay --artifact-dir artifacts/prodclaw/layered-dry-run > artifacts/prodclaw/layered-dry-run-replay.txt
+          grep -q 'Valid: true' artifacts/prodclaw/layered-dry-run-replay.txt
+
+      - name: Upload Dry-Run Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prodclaw-dry-run-artifacts
+          path: artifacts/prodclaw/
+          retention-days: 7
+
+  real-agent:
+    name: Optional Real Codex Run
+    runs-on: ubuntu-latest
+    needs: dry-run
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install ProdClaw And Codex
+        run: |
+          GOPROXY=direct go install "github.com/safe-agentic-world/prodclaw/cmd/prodclaw@${PRODCLAW_INSTALL_REF}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          npm i -g @openai/codex@latest
+
+      - name: Run Codex Through ProdClaw
+        run: |
+          mkdir -p artifacts/prodclaw
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY is not set; skipping optional real-agent example."
+            exit 0
+          fi
+          printenv OPENAI_API_KEY | codex login --with-api-key
+          prodclaw job run \
+            --agent codex \
+            --profile "$PRODCLAW_PROFILE" \
+            --task-file examples/tasks/codex-smoke.md \
+            --artifact-dir artifacts/prodclaw/real-codex \
+            --probe-tools \
+            --expect-action process.exec \
+            --expect-action fs.write \
+            --expect-action artifact.write
+          prodclaw replay --artifact-dir artifacts/prodclaw/real-codex > artifacts/prodclaw/real-codex-replay.txt
+          grep -q 'Valid: true' artifacts/prodclaw/real-codex-replay.txt
+
+      - name: Policy Denial Example
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY is not set; skipping optional policy-denial agent example."
+            exit 0
+          fi
+          set +e
+          prodclaw job run \
+            --agent codex \
+            --profile "$PRODCLAW_PROFILE" \
+            --task-file examples/tasks/policy-denial.md \
+            --artifact-dir artifacts/prodclaw/policy-denial \
+            --expect-action process.exec
+          status=$?
+          set -e
+          test "$status" -eq 10
+
+      - name: Budget Exhaustion Example
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY is not set; skipping optional budget-exhaustion agent example."
+            exit 0
+          fi
+          set +e
+          prodclaw job run \
+            --agent codex \
+            --profile "$PRODCLAW_PROFILE" \
+            --task-file examples/tasks/budget-exhaustion.md \
+            --artifact-dir artifacts/prodclaw/budget-exhaustion \
+            --expect-action process.exec \
+            --max-tool-calls 1
+          status=$?
+          set -e
+          test "$status" -eq 60
+
+      - name: Upload Real-Agent Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prodclaw-real-agent-artifacts
+          path: artifacts/prodclaw/
+          retention-days: 7

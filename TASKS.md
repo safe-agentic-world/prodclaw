@@ -918,24 +918,24 @@ Nomos reference: check `../nomos` for reusable code, tests, or docs patterns; co
 
 Deliverables:
 
-- [ ] GitHub Actions example using CLI install.
-- [ ] GitLab CI example using CLI install.
+- [x] GitHub Actions example using CLI install.
+- [x] GitLab CI example using CLI install.
 - [x] GitLab CI customer test installs ProdClaw from source and runs policy preflight.
-- [ ] example task file.
-- [ ] example customer policy.
-- [ ] example explicit policy-layering config.
-- [ ] example artifacts upload.
-- [ ] example policy denial job.
-- [ ] example budget-exhaustion job.
+- [x] example task file.
+- [x] example customer policy.
+- [x] example explicit policy-layering config.
+- [x] example artifacts upload.
+- [x] example policy denial job.
+- [x] example budget-exhaustion job.
 - [x] example policy preflight covers denied protected-branch push.
 - [x] example live Codex task verifies governed command and file-write audit.
 
 Acceptance:
 
-- [ ] Examples run in CI without operator interaction.
-- [ ] Examples do not require model credentials for dry-run.
-- [ ] Examples clearly separate dry-run, policy check, and real-agent execution.
-- [ ] Examples upload ProdClaw artifacts.
+- [x] Examples run in CI without operator interaction.
+- [x] Examples do not require model credentials for dry-run.
+- [x] Examples clearly separate dry-run, policy check, and real-agent execution.
+- [x] Examples upload ProdClaw artifacts.
 - [x] GitLab CI customer test uploads ProdClaw audit artifacts.
 
 ## M18 - Documentation, Threat Model, And Security Mapping
