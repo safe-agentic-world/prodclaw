@@ -901,12 +901,14 @@ func (s *Server) runCommand(ctx context.Context, args json.RawMessage) (any, err
 		return nil, errors.New("argv is required")
 	}
 	cwd := s.workspace
+	policyCWD := ""
 	if strings.TrimSpace(input.CWD) != "" {
-		abs, _, err := s.workspacePath(input.CWD)
+		abs, rel, err := s.workspacePath(input.CWD)
 		if err != nil {
 			return nil, err
 		}
 		cwd = abs
+		policyCWD = rel
 	}
 	if input.StdinMode == "" {
 		input.StdinMode = "none"
@@ -919,7 +921,7 @@ func (s *Server) runCommand(ctx context.Context, args json.RawMessage) (any, err
 	}
 	auth, err := s.authorize("run_command", "process.exec", "file://workspace/", map[string]any{
 		"argv":               input.Argv,
-		"cwd":                input.CWD,
+		"cwd":                policyCWD,
 		"env_allowlist_keys": input.EnvAllowlistKeys,
 		"stdin_mode":         input.StdinMode,
 		"shell_mode":         input.ShellMode,
@@ -1219,7 +1221,20 @@ func (s *Server) workspacePath(input string) (string, string, error) {
 		return s.workspace, "", nil
 	}
 	if filepath.IsAbs(cleanInput) {
-		return "", "", errors.New("absolute paths are not allowed")
+		rel, err := filepath.Rel(s.workspace, cleanInput)
+		if err != nil {
+			return "", "", err
+		}
+		if rel == "." {
+			return s.workspace, "", nil
+		}
+		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", "", errors.New("path escapes workspace")
+		}
+		if err := ensureNoSymlinkEscape(s.workspace, s.workspaceReal, cleanInput, "path escapes workspace"); err != nil {
+			return "", "", err
+		}
+		return cleanInput, filepath.ToSlash(rel), nil
 	}
 	abs := filepath.Join(s.workspace, cleanInput)
 	rel, err := filepath.Rel(s.workspace, abs)

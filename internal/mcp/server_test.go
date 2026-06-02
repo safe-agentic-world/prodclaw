@@ -70,6 +70,41 @@ func TestServerAllowsAndDeniesRunCommand(t *testing.T) {
 	}
 }
 
+func TestRunCommandAcceptsAbsoluteCWDWithinWorkspace(t *testing.T) {
+	bundle, err := profiles.Load("ci-standard")
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	workspace := t.TempDir()
+	child := filepath.Join(workspace, "child")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatalf("mkdir child: %v", err)
+	}
+	server, err := NewServer(Options{Bundle: bundle, Workspace: workspace})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	var executedCWDs []string
+	server.commandExec = func(ctx context.Context, workspace string, req commandRequest) commandResult {
+		executedCWDs = append(executedCWDs, req.CWD)
+		return commandResult{Stdout: "ok\n"}
+	}
+
+	for _, cwd := range []string{workspace, child} {
+		if _, err := server.runCommand(context.Background(), json.RawMessage(fmt.Sprintf(`{"argv":["git","status"],"cwd":%q}`, cwd))); err != nil {
+			t.Fatalf("run command with cwd %q: %v", cwd, err)
+		}
+	}
+	if len(executedCWDs) != 2 || executedCWDs[0] != workspace || executedCWDs[1] != child {
+		t.Fatalf("executed cwd = %+v, want [%q %q]", executedCWDs, workspace, child)
+	}
+
+	outside := filepath.Dir(workspace)
+	if _, err := server.runCommand(context.Background(), json.RawMessage(fmt.Sprintf(`{"argv":["git","status"],"cwd":%q}`, outside))); err == nil || !strings.Contains(err.Error(), "path escapes workspace") {
+		t.Fatalf("expected outside absolute cwd to be rejected, got %v", err)
+	}
+}
+
 func TestServerAcceptsToolInputAlias(t *testing.T) {
 	bundle, err := profiles.Load("ci-standard")
 	if err != nil {
