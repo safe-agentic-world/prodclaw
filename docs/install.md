@@ -23,6 +23,37 @@ prodclaw version
 prodclaw profiles list
 ```
 
+## Homebrew
+
+Install on macOS with:
+
+```bash
+brew install safe-agentic-world/prodclaw/prodclaw
+```
+
+## Scoop
+
+Install on Windows with:
+
+```powershell
+scoop bucket add prodclaw https://github.com/safe-agentic-world/scoop-prodclaw
+scoop install prodclaw
+```
+
+## Shell Installer
+
+Install the latest macOS or Linux release archive with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/prodclaw/main/install.sh | sh
+```
+
+Install a specific release with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/prodclaw/main/install.sh | PRODCLAW_VERSION=v0.1.0 sh
+```
+
 ## Release Archives
 
 Official releases publish Linux, macOS, and Windows archives on GitHub releases:
@@ -51,15 +82,3 @@ The release workflow can update these package repositories when the GitHub secre
 - `safe-agentic-world/scoop-prodclaw`
 
 This package-manager handoff is optional for the MVP raw CLI release. If package repo updates fail, the GitHub release can still publish as long as required checksums, signatures, SBOM, and provenance artifacts are present.
-
-Future install commands are expected to be:
-
-```bash
-brew tap safe-agentic-world/prodclaw
-brew install prodclaw
-```
-
-```powershell
-scoop bucket add prodclaw https://github.com/safe-agentic-world/scoop-prodclaw
-scoop install prodclaw
-```

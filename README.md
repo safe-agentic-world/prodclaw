@@ -41,10 +41,29 @@ Structured operational logs are written to `stderr` as JSON and redact token-lik
 
 ## Install
 
-For the MVP, install from source with Go:
+### Homebrew (macOS)
+
+```bash
+brew install safe-agentic-world/prodclaw/prodclaw
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add prodclaw https://github.com/safe-agentic-world/scoop-prodclaw
+scoop install prodclaw
+```
+
+### Build From Source (Go)
 
 ```bash
 go install github.com/safe-agentic-world/prodclaw/cmd/prodclaw@latest
+```
+
+### Shell Installer (macOS And Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/safe-agentic-world/prodclaw/main/install.sh | sh
 ```
 
 Versioned binaries are published from semantic release tags. The standard release path creates a tag like `v0.1.0` after `Enterprise CI` passes on `main`, then dispatches the release workflow to build Linux, macOS, and Windows artifacts with SHA256 checksums, Sigstore signatures, an SPDX SBOM, and release provenance.
