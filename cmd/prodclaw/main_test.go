@@ -305,6 +305,21 @@ func TestJobRunDryRunAcceptsTaskTextFlag(t *testing.T) {
 	}
 }
 
+func TestJobRunPassesCodexSkipGitRepoCheck(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runJob([]string{"run", "--agent", "codex", "--task-text", "say hi", "--skip-git-repo-check", "--dry-run"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("job run exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got jobRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if argv := strings.Join(got.LaunchPlan.Argv, "\x00"); !strings.Contains(argv, "exec\x00--skip-git-repo-check\x00-o\x00") {
+		t.Fatalf("launch argv missing codex exec skip flag: %+v", got.LaunchPlan.Argv)
+	}
+}
+
 func TestJobRunRejectsMultipleTaskSources(t *testing.T) {
 	taskPath := filepath.Join(t.TempDir(), "task.md")
 	if err := os.WriteFile(taskPath, []byte("fix the build\n"), 0o600); err != nil {

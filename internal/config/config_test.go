@@ -15,6 +15,8 @@ func TestLoadUsesFileThenEnvironment(t *testing.T) {
 			return "codex", true
 		case "PRODCLAW_CONTROLLED_CI":
 			return "true", true
+		case "PRODCLAW_SKIP_GIT_REPO_CHECK":
+			return "true", true
 		case "PRODCLAW_POLICY_REPOSITORY":
 			return "repo.yaml", true
 		case "PRODCLAW_POLICY_REPOSITORY_SHA256":
@@ -31,6 +33,9 @@ func TestLoadUsesFileThenEnvironment(t *testing.T) {
 	}
 	if !values.ControlledCI {
 		t.Fatalf("expected controlled CI override, got %+v", values)
+	}
+	if !values.SkipGitRepoCheck {
+		t.Fatalf("expected skip git repo check override, got %+v", values)
 	}
 	if values.PolicyInputs.Baseline.Path != "base.yaml" || values.PolicyInputs.Repository.Path != "repo.yaml" || values.PolicyInputs.Repository.SHA256 == "" {
 		t.Fatalf("expected layered policy inputs, got %+v", values.PolicyInputs)

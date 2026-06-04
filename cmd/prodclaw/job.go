@@ -121,6 +121,7 @@ func printJobHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --probe-tools               record advertised ProdClaw tools before launch")
 	fmt.Fprintln(w, "  --dry-run                   write deterministic preflight artifacts without launching")
 	fmt.Fprintln(w, "  --no-launch                 materialize artifacts/config and stop before launch")
+	fmt.Fprintln(w, "  --skip-git-repo-check       pass Codex exec --skip-git-repo-check for local non-repo workspaces")
 	fmt.Fprintln(w, "  --task-file <path>          task file path")
 	fmt.Fprintln(w, "  --task-text <text>          inline task text")
 	fmt.Fprintln(w, "  --task <path>               legacy alias for --task-file")
@@ -145,6 +146,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	var dryRun bool
 	var noLaunch bool
 	var controlledCI bool
+	var skipGitRepoCheck bool
 	var probeTools bool
 	var expectedActions repeatedStrings
 	var policyInputFlags policyInputFlagValues
@@ -171,6 +173,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&dryRun, "dry-run", false, "write artifacts without starting the agent")
 	fs.BoolVar(&noLaunch, "no-launch", false, "prepare launch plan without starting the agent")
 	fs.BoolVar(&controlledCI, "controlled-ci", false, "fail closed unless supported CI identity is complete")
+	fs.BoolVar(&skipGitRepoCheck, "skip-git-repo-check", false, "pass Codex exec --skip-git-repo-check")
 	fs.Usage = func() { printJobHelp(stderr) }
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -192,7 +195,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "job run: load config: %v\n", err)
 		return jobkit.ExitInvalidConfig
 	}
-	overlayJobFlags(fs, &cfg, agent, taskPath, taskFile, taskText, workspace, bundlePath, profileName, controlledCI, policyInputFlags)
+	overlayJobFlags(fs, &cfg, agent, taskPath, taskFile, taskText, workspace, bundlePath, profileName, controlledCI, skipGitRepoCheck, policyInputFlags)
 	agent = cfg.Agent
 	workspace = defaultString(cfg.Workspace, ".")
 	bundlePath = cfg.PolicyBundle
@@ -267,6 +270,7 @@ func runJobRun(args []string, stdout, stderr io.Writer) int {
 		MCPConfigPath:    filepath.Join(artifactDirAbs, adapter.Name()+".mcp.json"),
 		MCPConfig:        mcpConfig,
 		FinalMessagePath: artifacts.AgentMessage,
+		SkipGitRepoCheck: cfg.SkipGitRepoCheck,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "job run: build launch plan: %v\n", err)
@@ -437,7 +441,7 @@ func jobAssuranceLookup(base identity.LookupEnv) identity.LookupEnv {
 	}
 }
 
-func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, taskFile, taskText, workspace, bundlePath, profileName string, controlledCI bool, policyInputFlags policyInputFlagValues) {
+func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPath, taskFile, taskText, workspace, bundlePath, profileName string, controlledCI, skipGitRepoCheck bool, policyInputFlags policyInputFlagValues) {
 	if flagWasSet(fs, "agent") {
 		cfg.Agent = agent
 	}
@@ -467,6 +471,9 @@ func overlayJobFlags(fs *flag.FlagSet, cfg *runtimeconfig.Values, agent, taskPat
 	overlayPolicyInputFlags(fs, &cfg.PolicyInputs, policyInputFlags)
 	if flagWasSet(fs, "controlled-ci") {
 		cfg.ControlledCI = controlledCI
+	}
+	if flagWasSet(fs, "skip-git-repo-check") {
+		cfg.SkipGitRepoCheck = skipGitRepoCheck
 	}
 }
 

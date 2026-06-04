@@ -43,6 +43,33 @@ func TestCodexLaunchPlanUsesConfigOverrides(t *testing.T) {
 	}
 }
 
+func TestCodexLaunchPlanCanSkipGitRepoCheck(t *testing.T) {
+	builder, err := Lookup("codex")
+	if err != nil {
+		t.Fatalf("lookup codex: %v", err)
+	}
+	config, err := BuildMCPConfig("prodclaw", []string{"mcp", "--profile", "ci-strict"})
+	if err != nil {
+		t.Fatalf("build mcp config: %v", err)
+	}
+	plan, err := builder.Build(BuildInput{
+		Workspace:        "/workspace",
+		TaskPrompt:       "say hi",
+		MCPConfigPath:    "/workspace/.prodclaw/agent/codex.mcp.json",
+		MCPConfig:        config,
+		SkipGitRepoCheck: true,
+	})
+	if err != nil {
+		t.Fatalf("build codex plan: %v", err)
+	}
+	if got := strings.Join(plan.Argv, "\x00"); !strings.Contains(got, "exec\x00--skip-git-repo-check\x00say hi") {
+		t.Fatalf("codex argv missing exec skip-git-repo-check flag: %+v", plan.Argv)
+	}
+	if !plan.MCPAttachmentVerified {
+		t.Fatalf("expected MCP attachment verification to survive skip flag: %+v", plan)
+	}
+}
+
 func TestClaudeLaunchPlanUsesMCPConfigFlag(t *testing.T) {
 	builder, err := Lookup("claude")
 	if err != nil {

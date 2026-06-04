@@ -29,6 +29,8 @@ Use exactly one task source:
 
 `--workspace` defaults to the current directory. `--artifact-dir` defaults to `.prodclaw/job` inside the workspace.
 
+For local Codex smoke tests outside a Git repository, pass `--skip-git-repo-check`. ProdClaw forwards it as Codex's `exec --skip-git-repo-check` option. CI jobs should normally run in a checked-out repository and leave this unset.
+
 ## Policy Input
 
 Choose exactly one policy source:

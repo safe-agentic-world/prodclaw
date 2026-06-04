@@ -60,6 +60,7 @@ type BuildInput struct {
 	MCPConfigPath    string
 	MCPConfig        MCPClientConfig
 	FinalMessagePath string
+	SkipGitRepoCheck bool
 }
 
 type Builder interface {
@@ -150,6 +151,9 @@ func (b codexBuilder) Build(input BuildInput) (LaunchPlan, error) {
 		"--ask-for-approval", "never",
 		"--sandbox", "read-only",
 		"exec",
+	}
+	if input.SkipGitRepoCheck {
+		base.Argv = append(base.Argv, "--skip-git-repo-check")
 	}
 	if strings.TrimSpace(input.FinalMessagePath) != "" {
 		base.Argv = append(base.Argv, "-o", input.FinalMessagePath)

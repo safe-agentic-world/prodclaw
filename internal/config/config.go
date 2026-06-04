@@ -11,18 +11,19 @@ import (
 )
 
 type Values struct {
-	PolicyBundle string       `json:"policy_bundle,omitempty"`
-	PolicyInputs PolicyInputs `json:"policy_inputs,omitempty"`
-	Profile      string       `json:"profile,omitempty"`
-	Workspace    string       `json:"workspace,omitempty"`
-	AuditPath    string       `json:"audit,omitempty"`
-	Principal    string       `json:"principal,omitempty"`
-	Agent        string       `json:"agent,omitempty"`
-	Environment  string       `json:"environment,omitempty"`
-	TaskPath     string       `json:"task,omitempty"`
-	TaskFile     string       `json:"task_file,omitempty"`
-	TaskText     string       `json:"task_text,omitempty"`
-	ControlledCI bool         `json:"controlled_ci,omitempty"`
+	PolicyBundle     string       `json:"policy_bundle,omitempty"`
+	PolicyInputs     PolicyInputs `json:"policy_inputs,omitempty"`
+	Profile          string       `json:"profile,omitempty"`
+	Workspace        string       `json:"workspace,omitempty"`
+	AuditPath        string       `json:"audit,omitempty"`
+	Principal        string       `json:"principal,omitempty"`
+	Agent            string       `json:"agent,omitempty"`
+	Environment      string       `json:"environment,omitempty"`
+	TaskPath         string       `json:"task,omitempty"`
+	TaskFile         string       `json:"task_file,omitempty"`
+	TaskText         string       `json:"task_text,omitempty"`
+	ControlledCI     bool         `json:"controlled_ci,omitempty"`
+	SkipGitRepoCheck bool         `json:"skip_git_repo_check,omitempty"`
 }
 
 type PolicyInput struct {
@@ -119,6 +120,9 @@ func (v *Values) applyEnv(lookupEnv LookupEnv) {
 	}
 	if value, ok := lookupEnv("PRODCLAW_CONTROLLED_CI"); ok {
 		v.ControlledCI = parseBool(value)
+	}
+	if value, ok := lookupEnv("PRODCLAW_SKIP_GIT_REPO_CHECK"); ok {
+		v.SkipGitRepoCheck = parseBool(value)
 	}
 }
 
